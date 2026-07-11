@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sidebrain — For Minds That Never Turn Off</title>
+  <meta name="description" content="The private feed for your brain. Send anything — ideas, notes, links, inspiration. Searchable, tagged, organized forever." />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <style>
+    :root {
+      --bg: #060a07;
+      --raised: #0c130e;
+      --border: #1c2a20;
+      --border-strong: #2f4536;
+      --text: #d7e8da;
+      --dim: #93ab99;
+      --faint: #5c7263;
+      --white: #3cf58c;
+      --accent: #3cf58c;
+      --accent-ink: #04120a;
+      --amber: #ffb454;
+      --mono: "Courier New", Courier, monospace;
+      --sans: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    ::selection { background: var(--accent); color: var(--accent-ink); }
+    body::after {
+      content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 100;
+      background: repeating-linear-gradient(0deg, rgba(0,0,0,.22) 0 1px, transparent 1px 3px);
+      opacity: .18;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body { background: var(--bg); color: var(--text); font-family: var(--mono); line-height: 1.6; -webkit-font-smoothing: antialiased; }
+    a { color: inherit; text-decoration: none; }
+    .wrap { max-width: 1060px; margin: 0 auto; padding: 0 24px; }
+
+    /* nav */
+    nav { position: sticky; top: 0; z-index: 20; border-bottom: 1px solid var(--border); background: rgba(6,10,7,.85); backdrop-filter: blur(12px); }
+    nav .wrap { display: flex; align-items: center; gap: 26px; height: 62px; }
+    .logo { font-weight: 700; font-size: 17px; letter-spacing: .5px; }
+    .logo .tilde { color: var(--accent); text-shadow: 0 0 14px rgba(60,245,140,.4); }
+    .logo .cursor { display: inline-block; width: 9px; height: 15px; background: var(--accent); box-shadow: 0 0 14px rgba(60,245,140,.4); margin-left: 3px; vertical-align: -2px; animation: blink 1.1s steps(1) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+    nav .links { display: flex; gap: 22px; margin-left: auto; font-size: 13px; color: var(--dim); }
+    nav .links a:hover { color: var(--text); }
+    .cta { background: var(--accent); color: var(--accent-ink); font-weight: 700; padding: 9px 18px; border-radius: 11px; font-size: 13.5px; white-space: nowrap; box-shadow: 0 0 22px rgba(60,245,140,.22); }
+    .cta:hover { opacity: .88; }
+    @media (max-width: 720px) { nav .links { display: none; } nav .wrap { justify-content: space-between; } }
+
+    /* hero */
+    .hero { padding: 92px 0 70px; text-align: center; position: relative; overflow: hidden; }
+    .hero::before { content: ""; position: absolute; inset: 0; background: radial-gradient(600px 320px at 50% -60px, rgba(60,245,140,.08), transparent); pointer-events: none; }
+    .badge { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); border: 1px solid var(--border); padding: 5px 14px; border-radius: 999px; margin-bottom: 28px; }
+    .badge i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+    h1 { font-size: clamp(34px, 6vw, 60px); line-height: 1.12; letter-spacing: -1px; font-weight: 700; max-width: 800px; margin: 0 auto 22px; }
+    h1 em { font-style: normal; color: var(--faint); }
+    .sub { color: var(--dim); font-size: clamp(14px, 2vw, 17px); max-width: 560px; margin: 0 auto 34px; }
+    .hero-ctas { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 18px; }
+    .cta.big { padding: 13px 28px; font-size: 15px; border-radius: 13px; }
+    .ghostbtn { padding: 13px 28px; font-size: 15px; border-radius: 13px; border: 1px solid var(--border-strong); color: var(--dim); }
+    .ghostbtn:hover { color: var(--text); border-color: var(--faint); }
+    .micro { font-size: 12px; color: var(--faint); }
+    .micro span { margin: 0 10px; }
+
+    /* feed mockup */
+    .mock { max-width: 430px; margin: 56px auto 0; text-align: left; border: 1px solid var(--border); border-radius: 22px; background: var(--raised); padding: 18px; box-shadow: 0 30px 80px rgba(0,0,0,.5); }
+    .mock .mhead { display: flex; align-items: center; gap: 8px; padding-bottom: 12px; border-bottom: 1px solid var(--border); margin-bottom: 14px; font-size: 12px; color: var(--faint); }
+    .mock .mhead b { color: var(--text); }
+    .mcard { border: 1px solid var(--border); border-radius: 13px; padding: 11px 13px; margin-bottom: 10px; font-size: 12.5px; animation: rise .6s both; }
+    .mcard:nth-child(3) { animation-delay: .15s; } .mcard:nth-child(4) { animation-delay: .3s; } .mcard:nth-child(5) { animation-delay: .45s; }
+    @keyframes rise { from { opacity: 0; transform: translateY(10px); } }
+    .mtag { display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 8px; border-radius: 999px; margin-top: 7px; }
+    .mtag.idea { color: #f59e0b; background: rgba(245,158,11,.1); border: 1px solid rgba(245,158,11,.4); }
+    .mtag.link { color: #0ea5e9; background: rgba(14,165,233,.1); border: 1px solid rgba(14,165,233,.4); }
+    .mtag.todo { color: #22c55e; background: rgba(34,197,94,.1); border: 1px solid rgba(34,197,94,.4); }
+    .mtime { float: right; color: var(--faint); font-size: 10px; margin-top: 9px; }
+
+    /* sections */
+    section { padding: 84px 0; border-top: 1px solid var(--border); }
+    .eyebrow { text-align: center; font-size: 12px; letter-spacing: 3px; text-transform: uppercase; color: var(--faint); margin-bottom: 12px; }
+    h2 { text-align: center; font-size: clamp(24px, 4vw, 36px); letter-spacing: -.5px; margin-bottom: 10px; }
+    .lede { text-align: center; color: var(--dim); max-width: 520px; margin: 0 auto 52px; font-size: 14.5px; }
+
+    .grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+    .feat { border: 1px solid var(--border); border-radius: 18px; padding: 26px; background: var(--raised); }
+    .feat .ico { font-size: 22px; margin-bottom: 14px; display: block; }
+    .feat h3 { font-size: 16px; margin-bottom: 8px; }
+    .feat p { color: var(--dim); font-size: 13px; }
+
+    .steps { counter-reset: step; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+    .step { position: relative; border: 1px solid var(--border); border-radius: 18px; padding: 30px 26px 26px; }
+    .step::before { counter-increment: step; content: "0" counter(step); position: absolute; top: -14px; left: 22px; background: var(--bg); padding: 0 10px; color: var(--faint); font-weight: 700; letter-spacing: 2px; }
+    .step h3 { font-size: 15px; margin-bottom: 8px; }
+    .step p { color: var(--dim); font-size: 13px; }
+    .step code { background: var(--raised); border: 1px solid var(--border); border-radius: 7px; padding: 2px 8px; font-size: 12px; }
+
+    .quotes { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+    .quote { border: 1px solid var(--border); border-radius: 18px; padding: 22px; background: var(--raised); font-size: 13.5px; }
+    .quote .stars { color: #fbbf24; letter-spacing: 2px; font-size: 12px; margin-bottom: 10px; }
+    .quote .who { display: block; margin-top: 14px; color: var(--faint); font-size: 12px; }
+
+    .price { max-width: 430px; margin: 0 auto; border: 1px solid var(--border-strong); border-radius: 22px; padding: 34px; text-align: center; background: var(--raised); }
+    .price .amount { font-size: 46px; font-weight: 700; letter-spacing: -2px; }
+    .price .amount small { font-size: 15px; color: var(--faint); letter-spacing: 0; font-weight: 400; }
+    .price ul { list-style: none; margin: 24px 0 28px; text-align: left; }
+    .price li { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13.5px; color: var(--dim); }
+    .price li::before { content: "✓  "; color: var(--accent); font-weight: 700; }
+    .price li:last-child { border-bottom: none; }
+
+    footer { border-top: 1px solid var(--border); padding: 36px 0 48px; color: var(--faint); font-size: 12px; text-align: center; }
+    footer b { color: var(--dim); }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <div class="wrap">
+      <a class="logo" href="/"><span class="tilde">~/</span>sidebrain<span class="cursor"></span></a>
+      <div class="links">
+        <a href="#why">Why Sidebrain</a>
+        <a href="#how">How It Works</a>
+        <a href="#quotes">What people say</a>
+      </div>
+      <a class="cta" href="/app">Open your feed</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="wrap">
+      <span class="badge"><i></i> Always active — running on your machine</span>
+      <h1>Never Lose Another<br />Note, Idea, or Link <em>Again.</em></h1>
+      <p class="sub">The private feed for your brain. Send anything — ideas, notes, links, inspiration. Searchable, tagged, organized forever.</p>
+      <div class="hero-ctas">
+        <a class="cta big" href="/app">Get started free →</a>
+        <a class="ghostbtn" href="#how">See how it works</a>
+      </div>
+      <p class="micro">Zero setup<span>·</span>Works in any browser<span>·</span>Your data never leaves your machine</p>
+
+      <div class="mock" aria-hidden="true">
+        <div class="mhead"><b>Your feed</b> — for minds that never turn off</div>
+        <div class="mcard">App idea: a timer that donates to charity every time I snooze it
+          <span class="mtime">2:41 AM</span><span class="mtag idea">#idea</span></div>
+        <div class="mcard">https://en.wikipedia.org/wiki/Zeigarnik_effect — why unfinished tasks stick
+          <span class="mtime">11:19 AM</span><span class="mtag link">#read</span></div>
+        <div class="mcard">Pick up film from the lab before Saturday
+          <span class="mtime">4:03 PM</span><span class="mtag todo">#todo</span></div>
+        <div class="mcard">"The palest ink is better than the best memory."
+          <span class="mtime">9:56 PM</span><span class="mtag idea">#quote</span></div>
+      </div>
+    </div>
+  </header>
+
+  <section id="why">
+    <div class="wrap">
+      <p class="eyebrow">Why Sidebrain</p>
+      <h2>Send Everything. Sort Nothing.</h2>
+      <p class="lede">Built for the way your brain actually works — capture first, organize never.</p>
+      <div class="grid3">
+        <div class="feat"><span class="ico">⚡</span><h3>Capture in 3 seconds</h3>
+          <p>One box, zero friction. Type it, hit send, get back to your life. Whatever's on your mind, send it — it'll be here when you need it.</p></div>
+        <div class="feat"><span class="ico">🌙</span><h3>Always instant, always on</h3>
+          <p>Your inbox is always ready. 2 AM shower thought or mid-meeting spark — the feed never sleeps and never asks you to pick a folder.</p></div>
+        <div class="feat"><span class="ico">🗂️</span><h3>Everything in one place</h3>
+          <p>Search and scroll through everything you've ever sent. Tags, boards, calendars, and a free canvas — organization that happens after capture, not before.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <p class="eyebrow">How it works</p>
+      <h2>Up and running in under a minute.</h2>
+      <p class="lede">No system required. It just works.</p>
+      <div class="steps">
+        <div class="step"><h3>Start your server</h3><p>Run <code>node server.js</code> in this folder. No accounts, no signup, no credit card — it's yours.</p></div>
+        <div class="step"><h3>Send it anything</h3><p>Ideas, notes, links, images, to-dos. Type <code>#idea</code> anywhere in a note and it tags itself.</p></div>
+        <div class="step"><h3>Find everything</h3><p>Open the app and it's all there — searchable, tagged, pinned, and organized forever.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="quotes">
+    <div class="wrap">
+      <p class="eyebrow">What people say</p>
+      <h2>Real people, real ideas captured.</h2>
+      <p class="lede">If you have a mind that runs — this is for you.</p>
+      <div class="quotes">
+        <div class="quote"><div class="stars">★★★★★</div>"So clean. No clutter, no friction. Just your thoughts."<span class="who">— Danielle H.</span></div>
+        <div class="quote"><div class="stars">★★★★★</div>"It's fast. That matters more than people realize."<span class="who">— Patrick S.</span></div>
+        <div class="quote"><div class="stars">★★★★★</div>"Simple, elegant, useful. The holy trinity of software."<span class="who">— Jasmine W.</span></div>
+        <div class="quote"><div class="stars">★★★★★</div>"Zero learning curve. Massive payoff."<span class="who">— Product designer</span></div>
+        <div class="quote"><div class="stars">★★★★★</div>"Opened it. Understood it. Loved it. In that order."<span class="who">— Early user</span></div>
+        <div class="quote"><div class="stars">★★★★★</div>"Exactly what my brain needed."<span class="who">— Writer</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <p class="eyebrow">One plan. Everything included.</p>
+      <h2>Local Edition.</h2>
+      <p class="lede">Lifetime access. Zero payments. No subscription. Ever.</p>
+      <div class="price">
+        <div class="amount">$0 <small>forever</small></div>
+        <ul>
+          <li>Unlimited notes — no monthly caps, ever</li>
+          <li>Full message history, searchable forever</li>
+          <li>Tags, board, calendar &amp; free canvas views</li>
+          <li>Reminders and to-do lists</li>
+          <li>Image &amp; PDF attachments</li>
+          <li>Light mode + 3 dashboard fonts</li>
+          <li>One-click CSV export — your data is yours</li>
+        </ul>
+        <a class="cta big" href="/app">Open your feed →</a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap">
+      <b>Sidebrain</b> — for minds that never turn off.<br />
+      A personal, self-hosted recreation inspired by mindchuk.com. Your data lives in <b>data/db.json</b> and never leaves your machine.
+    </div>
+  </footer>
+
+</body>
+</html>

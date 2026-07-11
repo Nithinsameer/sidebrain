@@ -1,0 +1,760 @@
+#!/usr/bin/env node
+/**
+ * Sidebrain — zero-dependency personal server.
+ * Run: node server.js  (then open http://localhost:4780)
+ *
+ * Data lives in ./data/db.json, attachments in ./data/uploads/.
+ * Optional: set OPENAI_API_KEY to clean up voice-captured text with an LLM.
+ */
+
+const http = require('http');
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const os = require('os');
+
+const PORT = process.env.PORT || 4780;
+const ROOT = __dirname;
+const PUBLIC_DIR = path.join(ROOT, 'public');
+const DATA_DIR = path.join(ROOT, 'data');
+const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
+const DB_PATH = path.join(DATA_DIR, 'db.json');
+
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// ---------------------------------------------------------------- database
+
+const DEFAULT_DB = {
+  settings: {
+    theme: 'dark',          // dark | light
+    font: 'courier',        // courier | modern | classic
+    compact: false,
+    hideTagNav: false,
+    groupByTime: true,
+    boardColumns: [],       // tag ids used as board columns (2-5)
+    openaiKey: '',          // AI key for the Ask tab + voice cleanup (env var wins)
+    aiBaseUrl: '',          // optional OpenAI-compatible base URL (Groq, Ollama, ...)
+    aiModel: '',            // optional model override
+    ntfyTopic: '',          // ntfy.sh topic for free push notifications
+    discordWebhook: '',     // Discord webhook URL (alternative push channel)
+    telegramToken: '',      // Telegram bot token (alternative push channel)
+    telegramChatId: '',     // Telegram chat id for the bot
+    digestHour: 8,          // local hour for the daily task digest push (null = off)
+  },
+  tags: [],       // {id, name, color, keywords[], parent, createdAt}
+  messages: [],   // {id, text, createdAt, pinned, tagIds[], files[], list, checked[], canvas:{on,x,y}}
+  reminders: [],  // {id, text, due, done, createdAt}
+};
+
+function loadDb() {
+  try {
+    const db = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+    return { ...structuredClone(DEFAULT_DB), ...db, settings: { ...DEFAULT_DB.settings, ...(db.settings || {}) } };
+  } catch {
+    return structuredClone(DEFAULT_DB);
+  }
+}
+
+let db = loadDb();
+let saveTimer = null;
+
+if (!db.settings.captureToken) {
+  db.settings.captureToken = crypto.randomBytes(16).toString('hex');
+}
+
+// migration: task semantics (week planner shows only tasks)
+for (const m of db.messages) {
+  if (m.task === undefined) m.task = !!m.plannedFor;
+  m.done = !!m.done;
+}
+
+function saveDb() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    const tmp = DB_PATH + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
+    fs.renameSync(tmp, DB_PATH);
+  }, 50);
+}
+
+const uid = () => crypto.randomUUID();
+
+// ---------------------------------------------------------------- helpers
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.pdf': 'application/pdf',
+  '.ico': 'image/x-icon',
+  '.json': 'application/json',
+  '.webmanifest': 'application/manifest+json',
+};
+
+function send(res, status, body, type = 'application/json') {
+  const data = type === 'application/json' ? JSON.stringify(body) : body;
+  res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' });
+  res.end(data);
+}
+
+function readBody(req, limit = 220 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) { reject(new Error('payload too large')); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); }
+      catch (e) { reject(e); }
+    });
+    req.on('error', reject);
+  });
+}
+
+// Persist data-URL attachments to disk; pass through already-saved files.
+function materializeFiles(files) {
+  if (!Array.isArray(files)) return [];
+  return files.slice(0, 10).map((f) => {
+    if (f && f.url && !String(f.data || '').startsWith('data:')) {
+      return { url: f.url, name: f.name || 'file', type: f.type || '' };
+    }
+    const m = /^data:([^;,]+);base64,(.+)$/s.exec(f && f.data || '');
+    if (!m) return null;
+    const type = m[1];
+    const buf = Buffer.from(m[2], 'base64');
+    if (buf.length > 15 * 1024 * 1024) return null; // 15MB cap, like the original
+    const ext = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp', 'application/pdf': '.pdf', 'image/svg+xml': '.svg' }[type] || '.bin';
+    const name = uid() + ext;
+    fs.writeFileSync(path.join(UPLOAD_DIR, name), buf);
+    return { url: '/uploads/' + name, name: (f.name || name).slice(0, 120), type };
+  }).filter(Boolean);
+}
+
+// Auto-tag: match "#tagname" tokens (or tag keywords) in the text.
+function autoTagIds(text) {
+  const found = new Set();
+  const lower = String(text || '').toLowerCase();
+  const tokens = new Set((lower.match(/#([\p{L}\p{N}_-]+)/gu) || []).map((t) => t.slice(1)));
+  for (const tag of db.tags) {
+    const names = [tag.name, ...(tag.keywords || [])].map((s) => String(s).toLowerCase().replace(/^#/, ''));
+    for (const n of names) {
+      if (!n) continue;
+      if (tokens.has(n)) { found.add(tag.id); break; }
+      // bare trigger word at the very start of the message ("idea buy more RAM")
+      if (lower.startsWith(n + ' ')) { found.add(tag.id); break; }
+    }
+  }
+  return [...found];
+}
+
+function lanIp() {
+  for (const ifaces of Object.values(os.networkInterfaces())) {
+    for (const i of ifaces || []) {
+      if (i.family === 'IPv4' && !i.internal) return i.address;
+    }
+  }
+  return null;
+}
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_RE = /^\d{2}:\d{2}$/;
+
+function createMessage(body) {
+  const text = String(body.text || '').trim();
+  const files = materializeFiles(body.files);
+  if (!text && !files.length) return null;
+  const tagIds = [...new Set([...(body.tagIds || []), ...autoTagIds(text)])];
+  const tagNames = tagIds.map((id) => (db.tags.find((t) => t.id === id) || {}).name || '').map((n) => n.toLowerCase());
+  const msg = {
+    id: uid(),
+    text,
+    createdAt: body.createdAt || new Date().toISOString(),
+    pinned: false,
+    tagIds,
+    files,
+    list: !!body.list,
+    checked: [],
+    // tasks show up in the week planner; a #todo / #task tag marks one automatically
+    task: !!body.task || tagNames.includes('todo') || tagNames.includes('task'),
+    done: false,
+    plannedFor: DAY_RE.test(body.plannedFor || '') ? body.plannedFor : null,
+    dueTime: TIME_RE.test(body.dueTime || '') ? body.dueTime : null,
+    taskNotified: false,
+    canvas: { on: false, x: 40, y: 40 },
+  };
+  db.messages.unshift(msg);
+  saveDb();
+  return msg;
+}
+
+// AI config: env vars win, then Settings. Base URL/model overrides let this
+// point at any OpenAI-compatible API (Groq free tier, local Ollama, ...).
+function aiConfig() {
+  return {
+    key: process.env.OPENAI_API_KEY || String(db.settings.openaiKey || '').trim(),
+    base: (process.env.OPENAI_BASE_URL || String(db.settings.aiBaseUrl || '').trim() || 'https://api.openai.com/v1').replace(/\/+$/, ''),
+    model: process.env.OPENAI_MODEL || String(db.settings.aiModel || '').trim() || 'gpt-4o-mini',
+  };
+}
+
+// Clean up a raw voice transcription. Uses the AI when a key is present,
+// otherwise falls back to light heuristics.
+async function cleanupTranscript(text) {
+  const { key, base, model } = aiConfig();
+  if (key) {
+    try {
+      const r = await fetch(base + '/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
+        body: JSON.stringify({
+          model,
+          temperature: 0.2,
+          messages: [
+            { role: 'system', content: 'You clean up voice-note transcriptions. Fix punctuation, casing, and obvious transcription errors; remove filler words (um, uh, like, you know); keep the meaning, wording, and any #hashtags exactly as intended; never add new content or commentary. Return ONLY the cleaned text.' },
+            { role: 'user', content: text },
+          ],
+        }),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        const out = j.choices?.[0]?.message?.content?.trim();
+        if (out) return out;
+      }
+    } catch { /* fall through to heuristics */ }
+  }
+  let t = String(text || '')
+    .replace(/\b(u+m+|u+h+|erm+)\b[,.]?\s*/gi, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  if (t) t = t[0].toUpperCase() + t.slice(1);
+  return t;
+}
+
+// Free push notifications via ntfy.sh: the phone app subscribes to a secret
+// topic; we POST to it when a reminder comes due.
+async function notifyNtfy(title, body, priority = 'default') {
+  const topic = String(db.settings.ntfyTopic || '').trim();
+  if (!topic) return false;
+  try {
+    const r = await fetch('https://ntfy.sh/' + encodeURIComponent(topic), {
+      method: 'POST',
+      // header values must stay ASCII (Node fetch rejects non-Latin1) — emoji go in the body
+      headers: { Title: title.replace(/[^\x20-\x7e]/g, ''), Tags: 'brain', Priority: priority },
+      body,
+    });
+    return r.ok;
+  } catch { return false; }
+}
+
+async function notifyDiscord(title, body) {
+  const url = String(db.settings.discordWebhook || '').trim();
+  if (!/^https:\/\/(discord|discordapp)\.com\/api\/webhooks\//.test(url)) return false;
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: `**${title}**\n${body}`.slice(0, 1900) }),
+    });
+    return r.ok;
+  } catch { return false; }
+}
+
+async function notifyTelegram(title, body) {
+  const token = String(db.settings.telegramToken || '').trim();
+  const chat = String(db.settings.telegramChatId || '').trim();
+  if (!token || !chat) return false;
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chat, text: `${title}\n${body}`.slice(0, 4000) }),
+    });
+    return r.ok;
+  } catch { return false; }
+}
+
+// fan out to every configured channel; true if any of them accepted it
+async function notifyAll(title, body, priority = 'default') {
+  const results = await Promise.all([
+    notifyNtfy(title, body, priority),
+    notifyDiscord(title, body),
+    notifyTelegram(title, body),
+  ]);
+  return { any: results.some(Boolean), ntfy: results[0], discord: results[1], telegram: results[2] };
+}
+
+function localDay(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function anyChannelConfigured() {
+  return !!(String(db.settings.ntfyTopic || '').trim() ||
+    String(db.settings.discordWebhook || '').trim() ||
+    (String(db.settings.telegramToken || '').trim() && String(db.settings.telegramChatId || '').trim()));
+}
+
+setInterval(() => {
+  if (!anyChannelConfigured()) return;
+  const now = new Date();
+
+  // exact-time reminder pushes
+  for (const r of db.reminders) {
+    if (r.done || r.notified) continue;
+    if (Date.parse(r.due) <= now.getTime()) {
+      r.notified = true;
+      saveDb();
+      notifyAll('Sidebrain reminder', r.text, 'high');
+    }
+  }
+
+  // exact-time task pushes (tasks with a due time; "YYYY-MM-DDTHH:MM" parses as local time)
+  for (const m of db.messages) {
+    if (!m.task || m.done || m.taskNotified || !m.plannedFor || !m.dueTime) continue;
+    const t = Date.parse(`${m.plannedFor}T${m.dueTime}`);
+    if (!isNaN(t) && t <= now.getTime()) {
+      m.taskNotified = true;
+      saveDb();
+      notifyAll('Task due', m.text.split('\n')[0].slice(0, 140), 'high');
+    }
+  }
+
+  // morning digest: today's + overdue tasks from the week planner
+  const dh = db.settings.digestHour;
+  const today = localDay(now);
+  if (Number.isInteger(dh) && now.getHours() === dh && db.settings.lastDigestDay !== today) {
+    db.settings.lastDigestDay = today;
+    saveDb();
+    const open = db.messages.filter((m) => m.task && !m.done && m.plannedFor && m.plannedFor <= today);
+    if (open.length) {
+      const line = (m) => '- ' + m.text.split('\n')[0].slice(0, 80) + (m.dueTime ? ` @ ${m.dueTime}` : '');
+      const todays = open.filter((m) => m.plannedFor === today);
+      const overdue = open.filter((m) => m.plannedFor < today);
+      const title = `Today: ${todays.length} task${todays.length === 1 ? '' : 's'}` +
+        (overdue.length ? ` (+${overdue.length} overdue)` : '');
+      const body = [...todays.map(line), ...overdue.map((m) => line(m) + ' (overdue)')].join('\n');
+      notifyAll(title, body, 'high');
+    }
+  }
+}, 30000);
+
+// ---------------------------------------------------------------- ask (AI chat)
+
+const TAG_COLOR_KEYS = ['sky', 'green', 'amber', 'red', 'rose', 'teal', 'orange', 'cyan', 'lime', 'fuchsia', 'slate', 'rose2', 'peach', 'lavender'];
+
+function tagByNameOrCreate(name) {
+  const clean = String(name || '').trim().replace(/^#/, '');
+  if (!clean) return null;
+  let tag = db.tags.find((t) => t.name.toLowerCase() === clean.toLowerCase());
+  if (!tag) {
+    tag = { id: uid(), name: clean, color: TAG_COLOR_KEYS[db.tags.length % TAG_COLOR_KEYS.length], keywords: [], parent: null, createdAt: new Date().toISOString() };
+    db.tags.push(tag);
+  }
+  return tag;
+}
+
+const CHAT_TOOLS = [
+  { type: 'function', function: { name: 'update_note', description: 'Update fields on an existing note or task. Only pass fields you want to change.', parameters: { type: 'object', properties: {
+    id: { type: 'string', description: 'note id from the snapshot' },
+    text: { type: 'string' },
+    pinned: { type: 'boolean' },
+    task: { type: 'boolean', description: 'true = shows in week planner' },
+    done: { type: 'boolean' },
+    plannedFor: { type: ['string', 'null'], description: 'due date YYYY-MM-DD, or null to clear' },
+    dueTime: { type: ['string', 'null'], description: 'due time HH:MM (24h), or null to clear' },
+    tagNames: { type: 'array', items: { type: 'string' }, description: 'replace tags with these names (missing tags are created)' },
+  }, required: ['id'] } } },
+  { type: 'function', function: { name: 'create_note', description: 'Create a new note or task in the feed.', parameters: { type: 'object', properties: {
+    text: { type: 'string' },
+    task: { type: 'boolean' },
+    plannedFor: { type: ['string', 'null'], description: 'YYYY-MM-DD' },
+    dueTime: { type: ['string', 'null'], description: 'HH:MM 24h' },
+    tagNames: { type: 'array', items: { type: 'string' } },
+  }, required: ['text'] } } },
+  { type: 'function', function: { name: 'delete_note', description: 'Permanently delete a note. Only when the user clearly asked for deletion.', parameters: { type: 'object', properties: {
+    id: { type: 'string' },
+  }, required: ['id'] } } },
+  { type: 'function', function: { name: 'create_reminder', description: 'Create a reminder that pushes a notification at an exact time.', parameters: { type: 'object', properties: {
+    text: { type: 'string' },
+    due: { type: 'string', description: 'local datetime YYYY-MM-DDTHH:MM' },
+  }, required: ['text', 'due'] } } },
+];
+
+function applyChatTool(name, args) {
+  const brief = (t) => String(t || '').split('\n')[0].slice(0, 60);
+  if (name === 'create_note') {
+    const msg = createMessage({ text: args.text, task: !!args.task, plannedFor: args.plannedFor || undefined, dueTime: args.dueTime || undefined });
+    if (!msg) return { ok: false, error: 'empty text' };
+    if (Array.isArray(args.tagNames) && args.tagNames.length) {
+      msg.tagIds = [...new Set(args.tagNames.map((n) => tagByNameOrCreate(n)).filter(Boolean).map((t) => t.id))];
+    }
+    if (args.dueTime && TIME_RE.test(args.dueTime)) msg.dueTime = args.dueTime;
+    saveDb();
+    return { ok: true, id: msg.id, summary: `created "${brief(msg.text)}"` };
+  }
+  // snapshot ids are truncated to 8 chars — match by prefix
+  const msg = db.messages.find((m) => m.id === args.id || m.id.startsWith(String(args.id || '')));
+  if (name === 'delete_note') {
+    if (!msg) return { ok: false, error: 'not found' };
+    db.messages = db.messages.filter((m) => m.id !== args.id);
+    saveDb();
+    return { ok: true, summary: `deleted "${brief(msg.text)}"` };
+  }
+  if (name === 'update_note') {
+    if (!msg) return { ok: false, error: 'not found' };
+    const changed = [];
+    if ('text' in args && args.text) { msg.text = String(args.text); changed.push('text'); }
+    for (const k of ['pinned', 'task', 'done']) if (k in args) { msg[k] = !!args[k]; changed.push(k + (args[k] ? '' : ' off')); }
+    if ('plannedFor' in args) { msg.plannedFor = DAY_RE.test(args.plannedFor || '') ? args.plannedFor : null; msg.taskNotified = false; if (msg.plannedFor) msg.task = true; changed.push('due ' + (msg.plannedFor || 'cleared')); }
+    if ('dueTime' in args) { msg.dueTime = TIME_RE.test(args.dueTime || '') ? args.dueTime : null; msg.taskNotified = false; if (msg.dueTime) changed.push('at ' + msg.dueTime); }
+    if (Array.isArray(args.tagNames)) { msg.tagIds = [...new Set(args.tagNames.map((n) => tagByNameOrCreate(n)).filter(Boolean).map((t) => t.id))]; changed.push('tags'); }
+    saveDb();
+    return { ok: true, summary: `updated "${brief(msg.text)}" (${changed.join(', ')})` };
+  }
+  if (name === 'create_reminder') {
+    const t = Date.parse(args.due);
+    if (!args.text || isNaN(t)) return { ok: false, error: 'need text and a valid due datetime' };
+    const rem = { id: uid(), text: String(args.text), due: new Date(t).toISOString(), done: false, createdAt: new Date().toISOString() };
+    db.reminders.push(rem);
+    saveDb();
+    return { ok: true, summary: `reminder "${brief(rem.text)}" at ${args.due}` };
+  }
+  return { ok: false, error: 'unknown tool' };
+}
+
+function chatSystemPrompt() {
+  const tagName = (id) => (db.tags.find((t) => t.id === id) || {}).name;
+  const lines = [...db.messages]
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .slice(0, 250)
+    .map((m) => {
+      const kind = m.task ? (m.done ? 'task✓' : 'task') : 'note';
+      const due = m.plannedFor ? ` due:${m.plannedFor}${m.dueTime ? ' ' + m.dueTime : ''}` : '';
+      const tags = m.tagIds.map(tagName).filter(Boolean).join(',');
+      return `${m.id.slice(0, 8)} | ${m.createdAt.slice(0, 10)} | ${kind}${m.pinned ? ' pin' : ''}${due}${tags ? ' #' + tags : ''} | ${m.text.replace(/\n/g, ' ').slice(0, 160)}`;
+    });
+  const rems = db.reminders.filter((r) => !r.done).map((r) => `- ${r.text} @ ${r.due}`);
+  const now = new Date();
+  return `You are Sidebrain's assistant. Sidebrain is the user's private feed of notes, tasks (with optional due date/time), tags, and reminders.
+Now: ${now.toString()}.
+You can answer questions about the data and modify it with the tools. Note ids below are truncated to 8 chars — pass those ids to tools (they are matched by prefix). Prefer acting over asking when the request is clear; for bulk deletions, confirm first. Keep replies short and concrete. Use the user's timezone for all dates.
+
+NOTES (newest first: id | created | kind | text):
+${lines.join('\n') || '(none yet)'}
+
+OPEN REMINDERS:
+${rems.join('\n') || '(none)'}
+
+TAGS: ${db.tags.map((t) => t.name).join(', ') || '(none)'}`;
+}
+
+function csvEscape(v) {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function fetchTitle(url) {
+  return new Promise((resolve) => {
+    let u;
+    try { u = new URL(url); } catch { return resolve(null); }
+    if (!/^https?:$/.test(u.protocol)) return resolve(null);
+    const lib = u.protocol === 'https:' ? https : http;
+    const req = lib.get(u, { timeout: 5000, headers: { 'user-agent': 'Mozilla/5.0 MindChukLocal' } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return fetchTitle(new URL(res.headers.location, u).href).then(resolve);
+      }
+      let html = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { html += c; if (html.length > 200000) { req.destroy(); } });
+      res.on('end', () => {
+        const m = /<title[^>]*>([^<]*)<\/title>/i.exec(html);
+        resolve(m ? m[1].trim().slice(0, 200) : null);
+      });
+      res.on('close', () => {
+        const m = /<title[^>]*>([^<]*)<\/title>/i.exec(html);
+        resolve(m ? m[1].trim().slice(0, 200) : null);
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+  });
+}
+
+// ---------------------------------------------------------------- api
+
+async function handleApi(req, res, pathname) {
+  const parts = pathname.split('/').filter(Boolean); // ['api', resource, id?]
+  const resource = parts[1];
+  const id = parts[2];
+  const method = req.method;
+
+  // ---- state
+  if (resource === 'state' && method === 'GET') {
+    const ip = lanIp();
+    return send(res, 200, { ...db, meta: { lanUrl: ip ? `http://${ip}:${PORT}` : null } });
+  }
+
+  // ---- voice / external capture (Apple Shortcuts etc.)
+  if (resource === 'capture' && method === 'POST') {
+    const auth = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const token = auth || new URL(req.url, 'http://x').searchParams.get('token') || '';
+    if (token !== db.settings.captureToken) return send(res, 401, { error: 'invalid capture token' });
+    const body = await readBody(req);
+    const raw = String(body.text || '').trim();
+    if (!raw) return send(res, 400, { error: 'text required' });
+    const text = body.raw ? raw : await cleanupTranscript(raw);
+    const msg = createMessage({ ...body, text });
+    if (!msg) return send(res, 400, { error: 'empty message' });
+    return send(res, 201, msg);
+  }
+
+  // ---- settings
+  if (resource === 'settings' && method === 'PATCH') {
+    const body = await readBody(req);
+    db.settings = { ...db.settings, ...body };
+    saveDb();
+    return send(res, 200, db.settings);
+  }
+
+  // ---- messages
+  if (resource === 'messages') {
+    if (method === 'POST') {
+      const body = await readBody(req);
+      const msg = createMessage(body);
+      if (!msg) return send(res, 400, { error: 'empty message' });
+      return send(res, 201, msg);
+    }
+    if (method === 'PATCH' && id) {
+      const msg = db.messages.find((m) => m.id === id);
+      if (!msg) return send(res, 404, { error: 'not found' });
+      const body = await readBody(req);
+      if ('text' in body) {
+        msg.text = String(body.text);
+        msg.tagIds = [...new Set([...(body.tagIds || msg.tagIds), ...autoTagIds(msg.text)])];
+      }
+      if ('tagIds' in body) msg.tagIds = [...new Set(body.tagIds)];
+      for (const k of ['pinned', 'list', 'checked', 'canvas', 'task', 'done']) if (k in body) msg[k] = body[k];
+      if ('plannedFor' in body) msg.plannedFor = DAY_RE.test(body.plannedFor || '') ? body.plannedFor : null;
+      if ('dueTime' in body) msg.dueTime = TIME_RE.test(body.dueTime || '') ? body.dueTime : null;
+      // rescheduling re-arms the exact-time push
+      if ('plannedFor' in body || 'dueTime' in body) msg.taskNotified = false;
+      if ('files' in body) msg.files = materializeFiles(body.files);
+      saveDb();
+      return send(res, 200, msg);
+    }
+    if (method === 'DELETE' && id) {
+      db.messages = db.messages.filter((m) => m.id !== id);
+      saveDb();
+      return send(res, 200, { ok: true });
+    }
+  }
+
+  // ---- tags
+  if (resource === 'tags') {
+    if (method === 'POST') {
+      const body = await readBody(req);
+      const name = String(body.name || '').trim().replace(/^#/, '');
+      if (!name) return send(res, 400, { error: 'name required' });
+      if (db.tags.some((t) => t.name.toLowerCase() === name.toLowerCase())) {
+        return send(res, 409, { error: 'Tag name already exists.' });
+      }
+      const tag = {
+        id: uid(),
+        name,
+        color: body.color || 'sky',
+        keywords: (body.keywords || []).map((k) => String(k).trim()).filter(Boolean).slice(0, 10),
+        parent: body.parent || null,
+        createdAt: new Date().toISOString(),
+      };
+      db.tags.push(tag);
+      saveDb();
+      return send(res, 201, tag);
+    }
+    if (method === 'PATCH' && id) {
+      const tag = db.tags.find((t) => t.id === id);
+      if (!tag) return send(res, 404, { error: 'not found' });
+      const body = await readBody(req);
+      if ('name' in body) tag.name = String(body.name).trim().replace(/^#/, '') || tag.name;
+      if ('color' in body) tag.color = body.color;
+      if ('keywords' in body) tag.keywords = (body.keywords || []).map((k) => String(k).trim()).filter(Boolean).slice(0, 10);
+      if ('parent' in body) tag.parent = body.parent || null;
+      saveDb();
+      return send(res, 200, tag);
+    }
+    if (method === 'DELETE' && id) {
+      db.tags = db.tags.filter((t) => t.id !== id);
+      db.tags.forEach((t) => { if (t.parent === id) t.parent = null; });
+      db.messages.forEach((m) => { m.tagIds = m.tagIds.filter((tid) => tid !== id); });
+      db.settings.boardColumns = (db.settings.boardColumns || []).filter((tid) => tid !== id);
+      saveDb();
+      return send(res, 200, { ok: true });
+    }
+  }
+
+  // ---- reminders
+  if (resource === 'reminders') {
+    if (method === 'POST') {
+      const body = await readBody(req);
+      const text = String(body.text || '').trim();
+      if (!text) return send(res, 400, { error: 'Reminder text is required.' });
+      if (!body.due || isNaN(Date.parse(body.due))) return send(res, 400, { error: 'Fill in all date and time fields.' });
+      const rem = { id: uid(), text, due: body.due, done: false, createdAt: new Date().toISOString() };
+      db.reminders.push(rem);
+      saveDb();
+      return send(res, 201, rem);
+    }
+    if (method === 'PATCH' && id) {
+      const rem = db.reminders.find((r) => r.id === id);
+      if (!rem) return send(res, 404, { error: 'not found' });
+      const body = await readBody(req);
+      for (const k of ['text', 'due', 'done']) if (k in body) rem[k] = body[k];
+      saveDb();
+      return send(res, 200, rem);
+    }
+    if (method === 'DELETE' && id) {
+      db.reminders = db.reminders.filter((r) => r.id !== id);
+      saveDb();
+      return send(res, 200, { ok: true });
+    }
+  }
+
+  // ---- csv export
+  if (resource === 'export.csv' && method === 'GET') {
+    const tagName = (tid) => (db.tags.find((t) => t.id === tid) || {}).name || '';
+    const rows = [['created_at', 'text', 'tags', 'pinned', 'attachments']];
+    for (const m of db.messages) {
+      rows.push([m.createdAt, m.text, m.tagIds.map(tagName).filter(Boolean).join('; '), m.pinned ? 'yes' : 'no', (m.files || []).map((f) => f.name).join('; ')]);
+    }
+    const csv = rows.map((r) => r.map(csvEscape).join(',')).join('\n');
+    res.writeHead(200, {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="sidebrain-export.csv"',
+    });
+    return res.end(csv);
+  }
+
+  // ---- ask: AI chat over the app's data, with tool-calling for edits
+  if (resource === 'chat' && method === 'POST') {
+    const { key, base, model } = aiConfig();
+    if (!key) return send(res, 400, { error: 'No AI key configured. Open Settings → AI assistant and paste an OpenAI API key (or a Groq key with its base URL).' });
+    const body = await readBody(req);
+    const history = (Array.isArray(body.messages) ? body.messages : [])
+      .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+      .slice(-16);
+    const msgs = [{ role: 'system', content: chatSystemPrompt() }, ...history];
+    const actions = [];
+    for (let step = 0; step < 6; step++) {
+      let r;
+      try {
+        r = await fetch(base + '/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
+          body: JSON.stringify({ model, messages: msgs, tools: CHAT_TOOLS, tool_choice: 'auto', temperature: 0.3 }),
+        });
+      } catch (e) {
+        return send(res, 502, { error: 'Could not reach the AI API: ' + String(e.message || e) });
+      }
+      if (!r.ok) {
+        const t = await r.text().catch(() => '');
+        return send(res, 502, { error: `AI request failed (${r.status}): ${t.slice(0, 300)}` });
+      }
+      const j = await r.json();
+      const msg = j.choices?.[0]?.message;
+      if (!msg) return send(res, 502, { error: 'AI returned an empty response.' });
+      msgs.push(msg);
+      if (msg.tool_calls?.length) {
+        for (const tc of msg.tool_calls) {
+          let out;
+          try { out = applyChatTool(tc.function.name, JSON.parse(tc.function.arguments || '{}')); }
+          catch (e) { out = { ok: false, error: String(e.message || e) }; }
+          if (out.summary) actions.push(out.summary);
+          msgs.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(out) });
+        }
+        continue;
+      }
+      return send(res, 200, { reply: msg.content || '', actions });
+    }
+    return send(res, 200, { reply: 'I stopped after several steps — the changes so far are listed below.', actions });
+  }
+
+  // ---- ntfy: save topic + send a test push
+  if (resource === 'ntfy-test' && method === 'POST') {
+    const body = await readBody(req);
+    if ('topic' in body) db.settings.ntfyTopic = String(body.topic || '').trim();
+    if ('discordWebhook' in body) db.settings.discordWebhook = String(body.discordWebhook || '').trim();
+    if ('telegramToken' in body) db.settings.telegramToken = String(body.telegramToken || '').trim();
+    if ('telegramChatId' in body) db.settings.telegramChatId = String(body.telegramChatId || '').trim();
+    saveDb();
+    const result = await notifyAll('Sidebrain connected', 'Push notifications are working ✓ Reminders will arrive here.');
+    return send(res, 200, { ok: result.any, channels: result });
+  }
+
+  // ---- link title lookup
+  if (resource === 'link-title' && method === 'POST') {
+    const body = await readBody(req);
+    const title = await fetchTitle(body.url);
+    return send(res, 200, { title });
+  }
+
+  return send(res, 404, { error: 'not found' });
+}
+
+// ---------------------------------------------------------------- static
+
+function serveFile(res, filePath) {
+  fs.readFile(filePath, (err, data) => {
+    if (err) return send(res, 404, '404 Not Found', 'text/plain');
+    const ext = path.extname(filePath).toLowerCase();
+    const type = MIME[ext] || 'application/octet-stream';
+    // app code must revalidate every load or iOS PWAs serve stale versions;
+    // uploaded media is immutable and can cache hard
+    const cache = filePath.startsWith(UPLOAD_DIR)
+      ? 'public, max-age=31536000, immutable'
+      : 'no-cache';
+    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': cache });
+    res.end(data);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+  const pathname = decodeURIComponent(url.pathname);
+
+  try {
+    if (pathname.startsWith('/api/')) return await handleApi(req, res, pathname);
+
+    if (pathname.startsWith('/uploads/')) {
+      const file = path.normalize(path.join(UPLOAD_DIR, pathname.slice('/uploads/'.length)));
+      if (!file.startsWith(UPLOAD_DIR)) return send(res, 403, 'forbidden', 'text/plain');
+      return serveFile(res, file);
+    }
+
+    let rel = pathname === '/' ? '/index.html' : pathname === '/app' ? '/app.html' : pathname;
+    const file = path.normalize(path.join(PUBLIC_DIR, rel));
+    if (!file.startsWith(PUBLIC_DIR)) return send(res, 403, 'forbidden', 'text/plain');
+    return serveFile(res, file);
+  } catch (e) {
+    return send(res, 500, { error: String(e.message || e) });
+  }
+});
+
+server.listen(PORT, () => {
+  const ip = lanIp();
+  console.log(`\n  Sidebrain — for minds that never turn off`);
+  console.log(`  ➜  http://localhost:${PORT}         (landing page)`);
+  console.log(`  ➜  http://localhost:${PORT}/app     (your feed)`);
+  if (ip) console.log(`  ➜  http://${ip}:${PORT}/app   (phone, same Wi-Fi)`);
+  console.log(`  ➜  capture token: ${db.settings.captureToken}  (for Apple Shortcuts → POST /api/capture)`);
+  console.log(`  ➜  voice cleanup: ${process.env.OPENAI_API_KEY ? 'OpenAI (' + (process.env.OPENAI_MODEL || 'gpt-4o-mini') + ')' : 'heuristic (set OPENAI_API_KEY for LLM cleanup)'}\n`);
+  saveDb(); // persist a freshly generated capture token
+});

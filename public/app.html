@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Sidebrain — Your Feed</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Sidebrain" />
+  <meta name="theme-color" content="#060a07" />
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+
+  <header class="topbar">
+    <a class="logo" href="/"><span class="tilde">~/</span>sidebrain<span class="cursor"></span></a>
+
+    <div class="searchwrap">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="search" type="text" placeholder="Search by text or date..." autocomplete="off" />
+      <button id="searchClear" title="Clear search">✕</button>
+    </div>
+
+    <button class="iconbtn" id="btnFilter" title="Filter by date">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+    </button>
+
+    <nav class="viewswitch" id="viewSwitch">
+      <button data-view="feed">Feed</button>
+      <button data-view="board">Board</button>
+      <button data-view="week">Week</button>
+      <button data-view="calendar">Calendar</button>
+      <button data-view="ask">Ask</button>
+    </nav>
+
+    <button class="iconbtn" id="btnReminders" title="Reminders">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+      <span class="dot"></span>
+    </button>
+    <button class="iconbtn" id="btnSettings" title="Settings">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v3m0 16v3M4.2 4.2l2.2 2.2m11.2 11.2 2.2 2.2M1 12h3m16 0h3M4.2 19.8l2.2-2.2M17.6 6.4l2.2-2.2"/></svg>
+    </button>
+  </header>
+
+  <div class="filterbar" id="filterbar" hidden>
+    <span class="fl">Filter by</span>
+    <select id="filterField">
+      <option value="created">Created date</option>
+      <option value="due">Due date</option>
+    </select>
+    <input type="date" id="filterDate" />
+    <button class="btn" id="filterClear">Clear</button>
+  </div>
+
+  <nav class="tagbar" id="tagbar"></nav>
+
+  <!-- FEED -->
+  <main class="main full" id="view-feed">
+    <div class="composer" id="composer">
+      <textarea id="composeText" placeholder="What's on your mind?" rows="2"></textarea>
+      <div class="compose-previews" id="composePreviews"></div>
+      <div class="compose-tags" id="composeTags"></div>
+      <div class="row">
+        <button class="minibtn" id="btnAttach" title="Attach file (image or PDF)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          Attach
+        </button>
+        <button class="minibtn" id="btnListMode" title="To-Do List">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h.01M3 12h.01M3 18h.01M8 6h13M8 12h13M8 18h13"/></svg>
+          To-Do
+        </button>
+        <button class="minibtn" id="btnComposeTag" title="Tag this note">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2H2v10l9.29 9.29a1 1 0 0 0 1.42 0l8.58-8.58a1 1 0 0 0 0-1.42Z"/><path d="M7 7h.01"/></svg>
+          Tag
+        </button>
+        <span class="spacer"></span>
+        <span class="minibtn" id="composeHint" style="cursor:default">⌘↵ to send</span>
+        <button class="sendbtn" id="btnSend" disabled>Send</button>
+      </div>
+      <input type="file" id="fileInput" accept="image/*,application/pdf" multiple hidden />
+    </div>
+    <div id="feedGroups"></div>
+  </main>
+
+  <!-- BOARD -->
+  <main class="main wide" id="view-board" hidden>
+    <div class="viewbar">
+      <span class="title">Board View</span>
+      <button class="btn" id="btnChangeCols">Change columns</button>
+      <button class="btn" data-goto="feed">Exit board</button>
+    </div>
+    <div class="board" id="boardCols"></div>
+  </main>
+
+  <!-- WEEK -->
+  <main class="main wide" id="view-week" hidden>
+    <div class="viewbar">
+      <span class="title">This Week</span>
+      <button class="btn" id="weekPrev">←</button>
+      <button class="btn" id="weekToday">Today</button>
+      <button class="btn" id="weekNext">→</button>
+      <button class="btn" data-goto="feed">Exit week</button>
+    </div>
+    <div class="week" id="weekCols"></div>
+    <div class="week-inbox" id="weekInbox"></div>
+  </main>
+
+  <!-- CALENDAR -->
+  <main class="main wide" id="view-calendar" hidden>
+    <div class="viewbar">
+      <span class="title">Calendar View</span>
+      <button class="btn" data-goto="feed">Exit calendar</button>
+    </div>
+    <div class="cal-body" id="calBody">
+      <div class="cal-left">
+        <div class="cal-head">
+          <button class="btn" id="calPrev">←</button>
+          <span class="month" id="calMonth"></span>
+          <button class="btn" id="calNext">→</button>
+        </div>
+        <div class="cal-grid" id="calGrid"></div>
+      </div>
+      <div class="cal-entries" id="calEntries"></div>
+    </div>
+  </main>
+
+  <!-- CANVAS -->
+  <main class="main wide" id="view-canvas" hidden>
+    <div class="viewbar">
+      <span class="title">Free Canvas</span>
+      <button class="btn" id="btnFolder">Open card folder</button>
+      <button class="btn" data-goto="feed">Exit flex view</button>
+    </div>
+    <div class="canvas-wrap" id="canvasWrap">
+      <div class="folder" id="folder">
+        <header>Card folder <button class="iconbtn" id="folderClose">✕</button></header>
+        <input class="f-search" id="folderSearch" type="text" placeholder="Search all cards..." />
+        <div class="f-tags" id="folderTags"></div>
+        <div class="f-list" id="folderList"></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ASK (AI chat) -->
+  <main class="main" id="view-ask" hidden>
+    <div class="chat-wrap">
+      <div class="chat-log" id="chatLog"></div>
+      <div class="chat-inputrow">
+        <textarea id="chatInput" rows="1" placeholder="Ask about your notes, or tell me what to change..."></textarea>
+        <button class="sendbtn" id="chatSend">Ask</button>
+      </div>
+    </div>
+  </main>
+
+  <div class="modal-root" id="modalRoot">
+    <div class="backdrop"></div>
+    <div class="modal" id="modalBox"></div>
+  </div>
+
+  <div class="lightbox" id="lightbox">
+    <button class="lb-close">✕</button>
+    <button class="lb-prev">‹</button>
+    <img id="lightboxImg" alt="Attached media" />
+    <button class="lb-next">›</button>
+  </div>
+
+  <div class="duebanner" id="dueBanner"></div>
+  <div class="toast" id="toast"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

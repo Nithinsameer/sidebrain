@@ -1,0 +1,14 @@
+{
+  "name": "Sidebrain",
+  "short_name": "Sidebrain",
+  "description": "The private feed for your brain — searchable, tagged, organized forever.",
+  "start_url": "/app",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#060a07",
+  "theme_color": "#060a07",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/apple-touch-icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

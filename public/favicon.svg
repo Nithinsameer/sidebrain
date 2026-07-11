@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#060a07"/>
+  <path d="M14 18h36a4 4 0 0 1 4 4v16a4 4 0 0 1-4 4H30l-8 8v-8h-8a4 4 0 0 1-4-4V22a4 4 0 0 1 4-4z" fill="none" stroke="#3cf58c" stroke-width="3.5" stroke-linejoin="round"/>
+  <text x="32" y="36" font-family="Courier New, monospace" font-size="16" font-weight="bold" fill="#3cf58c" text-anchor="middle">~/</text>
+</svg>

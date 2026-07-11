@@ -1,0 +1,6 @@
+# personal data — notes, uploads, tokens, webhooks, API keys live here. NEVER commit.
+data/
+
+.DS_Store
+node_modules/
+*.log
