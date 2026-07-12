@@ -1570,6 +1570,20 @@ const CHAT_SUGGESTIONS = [
 
 UI.chat = []; // {role, content, actions?, error?}
 
+// minimal, safe markdown for assistant replies (escape first, then decorate)
+function md(text) {
+  let h = esc(text);
+  h = h.replace(/```(?:\w+)?\n?([\s\S]*?)```/g, (_, c) => `<pre class="mdcode">${c.trim()}</pre>`);
+  h = h.replace(/`([^`\n]+)`/g, '<code class="mdinline">$1</code>');
+  h = h.replace(/^#{1,4} (.+)$/gm, '<span class="mdh">$1</span>');
+  h = h.replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>');
+  h = h.replace(/(^|[\s(])\*([^*\n]+)\*/g, '$1<i>$2</i>');
+  h = h.replace(/^(?:[-*•]|\d+\.) (.+)$/gm, '<span class="mdli">• $1</span>');
+  h = h.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  h = h.replace(/(?<!["'=(\]])\bhttps?:\/\/[^\s<>"')\]]+/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
+  return h;
+}
+
 function renderAsk() {
   renderAutomations();
   const log = $('#chatLog');
@@ -1589,7 +1603,9 @@ function renderAsk() {
   log.innerHTML = UI.chat.map((m, i) => `
     <div class="chat-line ${m.role}">
       <span class="who">${m.role === 'user' ? 'you' : 'sidebrain'}</span>
-      <div class="bubble ${m.error ? 'err-text' : ''}">${m.pending ? '<span class="chat-typing">thinking<span>.</span><span>.</span><span>.</span></span>' : richText(m.content)}</div>
+      <div class="bubble ${m.error ? 'err-text' : ''}">${m.pending && !m.content
+        ? '<span class="chat-typing">thinking<span>.</span><span>.</span><span>.</span></span>'
+        : (m.role === 'assistant' && !m.error ? md(m.content) : richText(m.content)) + (m.pending ? '<span class="stream-cursor"></span>' : '')}</div>
       ${(m.actions || []).map((a) => `<div class="chat-act">✓ ${esc(a)}</div>`).join('')}
       ${m.actions && m.actions.length && m.sourcePrompt ? `<button class="chip save-auto" data-chatidx="${i}">💾 Save as automation</button>` : ''}
     </div>`).join('');
@@ -1657,10 +1673,41 @@ async function sendChat() {
   renderAsk();
   try {
     const history = UI.chat.filter((m) => !m.pending && !m.error).map((m) => ({ role: m.role, content: m.content }));
-    const res = await api('POST', 'chat', { messages: history });
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: history, stream: true }),
+    });
+    if (!res.ok || !res.body) throw new Error('Chat request failed (' + res.status + ')');
+
+    // consume the SSE stream: content deltas render live, actions appear as they apply
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    pending.actions = [];
+    let finished = false;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        let ev;
+        try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
+        if (ev.delta) { pending.content += ev.delta; renderAsk(); }
+        if (ev.action) { pending.actions.push(ev.action); renderAsk(); }
+        if (ev.error) throw new Error(ev.error);
+        if (ev.done) {
+          pending.content = ev.reply || pending.content || '(no reply)';
+          pending.actions = ev.actions || pending.actions;
+          finished = true;
+        }
+      }
+    }
+    if (!finished && !pending.content) throw new Error('The AI stream ended unexpectedly.');
     pending.pending = false;
-    pending.content = res.reply || '(no reply)';
-    pending.actions = res.actions || [];
     if (pending.actions.length) {
       await loadState();
       renderTagbar();

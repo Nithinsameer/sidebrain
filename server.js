@@ -273,7 +273,7 @@ async function notifyNtfy(title, body, priority = 'default') {
     const r = await fetch('https://ntfy.sh/' + encodeURIComponent(topic), {
       method: 'POST',
       // header values must stay ASCII (Node fetch rejects non-Latin1) — emoji go in the body
-      headers: { Title: title.replace(/[^\x20-\x7e]/g, ''), Tags: 'brain', Priority: priority },
+      headers: { Title: title.replace(/[^\x20-\x7e]/g, ''), Tags: 'brain', Priority: priority, Markdown: 'yes' },
       body,
     });
     return r.ok;
@@ -352,13 +352,11 @@ async function pollDiscordCapture() {
     const auth = { Authorization: 'Bot ' + token };
     const last = db.settings.discordLastMsgId;
     if (!last) {
-      // first run: set the baseline so old channel history isn't ingested
-      const r = await fetch(`https://discord.com/api/v10/channels/${chan}/messages?limit=1`, { headers: auth });
-      if (r.ok) {
-        const [latest] = await r.json();
-        db.settings.discordLastMsgId = latest ? latest.id : '0';
-        saveDb();
-      }
+      // first run: baseline 15 minutes back — a test message sent during setup
+      // still gets captured, but old channel history doesn't flood in
+      const snowflake = ((BigInt(Date.now() - 15 * 60000) - 1420070400000n) << 22n).toString();
+      db.settings.discordLastMsgId = snowflake;
+      saveDb();
       return;
     }
     const r = await fetch(`https://discord.com/api/v10/channels/${chan}/messages?limit=50&after=${last}`, { headers: auth });
@@ -609,9 +607,50 @@ ${rems.join('\n') || '(none)'}
 TAGS: ${db.tags.map((t) => t.name).join(', ') || '(none)'}`;
 }
 
+// One streamed chat-completions call: returns the assembled assistant message,
+// forwarding content deltas to onEvent as they arrive.
+async function streamCompletion({ key, base, model, msgs, onEvent }) {
+  const r = await fetch(base + '/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
+    body: JSON.stringify({ model, messages: msgs, tools: CHAT_TOOLS, tool_choice: 'auto', temperature: 0.3, stream: true }),
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    throw new Error(`AI request failed (${r.status}): ${t.slice(0, 300)}`);
+  }
+  const message = { role: 'assistant', content: '', tool_calls: [] };
+  const decoder = new TextDecoder();
+  let buf = '';
+  for await (const chunk of r.body) {
+    buf += decoder.decode(chunk, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop(); // keep the trailing partial line
+    for (const line of lines) {
+      const data = line.replace(/^data:\s*/, '').trim();
+      if (!data || !line.startsWith('data:') || data === '[DONE]') continue;
+      let delta;
+      try { delta = JSON.parse(data).choices?.[0]?.delta; } catch { continue; }
+      if (!delta) continue;
+      if (delta.content) {
+        message.content += delta.content;
+        if (onEvent) onEvent({ delta: delta.content });
+      }
+      for (const tc of delta.tool_calls || []) {
+        const slot = (message.tool_calls[tc.index] ||= { id: '', type: 'function', function: { name: '', arguments: '' } });
+        if (tc.id) slot.id = tc.id;
+        if (tc.function?.name) slot.function.name += tc.function.name;
+        if (tc.function?.arguments) slot.function.arguments += tc.function.arguments;
+      }
+    }
+  }
+  if (!message.tool_calls.length) delete message.tool_calls;
+  return message;
+}
+
 // One full agent turn: system prompt + history → (tool calls → apply)* → reply.
-// Used by the Ask tab and by scheduled circulations. Throws on failure.
-async function runAgentTurn(history) {
+// Used by the Ask tab (streaming via onEvent) and by circulations. Throws on failure.
+async function runAgentTurn(history, onEvent) {
   const { key, base, model } = aiConfig();
   if (!key) {
     const err = new Error('No AI key configured. Open Settings → AI assistant and paste an OpenAI API key (or a Groq key with its base URL).');
@@ -621,25 +660,17 @@ async function runAgentTurn(history) {
   const msgs = [{ role: 'system', content: chatSystemPrompt() }, ...history];
   const actions = [];
   for (let step = 0; step < 6; step++) {
-    const r = await fetch(base + '/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
-      body: JSON.stringify({ model, messages: msgs, tools: CHAT_TOOLS, tool_choice: 'auto', temperature: 0.3 }),
-    });
-    if (!r.ok) {
-      const t = await r.text().catch(() => '');
-      throw new Error(`AI request failed (${r.status}): ${t.slice(0, 300)}`);
-    }
-    const j = await r.json();
-    const msg = j.choices?.[0]?.message;
-    if (!msg) throw new Error('AI returned an empty response.');
+    const msg = await streamCompletion({ key, base, model, msgs, onEvent });
     msgs.push(msg);
     if (msg.tool_calls?.length) {
       for (const tc of msg.tool_calls) {
         let out;
         try { out = applyChatTool(tc.function.name, JSON.parse(tc.function.arguments || '{}')); }
         catch (e) { out = { ok: false, error: String(e.message || e) }; }
-        if (out.summary) actions.push(out.summary);
+        if (out.summary) {
+          actions.push(out.summary);
+          if (onEvent) onEvent({ action: out.summary });
+        }
         msgs.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(out) });
       }
       continue;
@@ -871,6 +902,17 @@ async function handleApi(req, res, pathname) {
     const history = (Array.isArray(body.messages) ? body.messages : [])
       .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
       .slice(-16);
+    if (body.stream) {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
+      const emit = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+      try {
+        const result = await runAgentTurn(history, emit);
+        emit({ done: true, reply: result.reply, actions: result.actions });
+      } catch (e) {
+        emit({ error: String(e.message || e) });
+      }
+      return res.end();
+    }
     try {
       const result = await runAgentTurn(history);
       return send(res, 200, result);
