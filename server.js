@@ -431,6 +431,49 @@ function applyChatTool(name, args) {
   return { ok: false, error: 'unknown tool' };
 }
 
+// Auto-classify a freshly captured note that arrived with no tags: pick tags,
+// decide if it's a task, and pull out any due date/time implied by the text.
+// Only fills gaps — never overrides tags/task/due values that already exist.
+async function classifyMessage(msgId) {
+  const { key, base, model } = aiConfig();
+  if (!key) return;
+  const snapshotText = (db.messages.find((m) => m.id === msgId) || {}).text;
+  if (!snapshotText) return;
+  try {
+    const r = await fetch(base + '/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        messages: [
+          { role: 'system', content: `You classify captured notes for a personal notes app. Now: ${new Date().toString()}. Existing tags: ${db.tags.map((t) => t.name).join(', ') || '(none yet)'}.
+Reply with ONLY a JSON object, no prose, shaped exactly like:
+{"tags": string[], "task": boolean, "plannedFor": "YYYY-MM-DD" | null, "dueTime": "HH:MM" | null}
+Rules: 0-2 tags; STRONGLY prefer existing tags; at most one new tag (single lowercase word) and only when clearly useful; task=true only for actionable to-dos; plannedFor/dueTime only when the text clearly implies a date/time (resolve relative words like "tomorrow" or "friday evening" using Now); otherwise null.` },
+          { role: 'user', content: snapshotText.slice(0, 600) },
+        ],
+      }),
+    });
+    if (!r.ok) return;
+    const j = await r.json();
+    const raw = j.choices?.[0]?.message?.content || '';
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return;
+    const c = JSON.parse(jsonMatch[0]);
+
+    const live = db.messages.find((m) => m.id === msgId); // may have been edited or deleted meanwhile
+    if (!live) return;
+    if (!live.tagIds.length && Array.isArray(c.tags)) {
+      live.tagIds = [...new Set(c.tags.slice(0, 2).map((n) => tagByNameOrCreate(n)).filter(Boolean).map((t) => t.id))];
+    }
+    if (c.task === true) live.task = true;
+    if (!live.plannedFor && DAY_RE.test(c.plannedFor || '')) { live.plannedFor = c.plannedFor; live.task = true; }
+    if (!live.dueTime && live.plannedFor && TIME_RE.test(c.dueTime || '')) live.dueTime = c.dueTime;
+    saveDb();
+  } catch { /* classification is best-effort */ }
+}
+
 function chatSystemPrompt() {
   const tagName = (id) => (db.tags.find((t) => t.id === id) || {}).name;
   const lines = [...db.messages]
@@ -515,7 +558,10 @@ async function handleApi(req, res, pathname) {
     const text = body.raw ? raw : await cleanupTranscript(raw);
     const msg = createMessage({ ...body, text });
     if (!msg) return send(res, 400, { error: 'empty message' });
-    return send(res, 201, msg);
+    // voice notes that arrived untagged get AI classification (awaited so the
+    // Shortcut response already carries the tags)
+    if (!msg.tagIds.length && msg.text) await classifyMessage(msg.id);
+    return send(res, 201, db.messages.find((m) => m.id === msg.id) || msg);
   }
 
   // ---- settings
@@ -532,6 +578,8 @@ async function handleApi(req, res, pathname) {
       const body = await readBody(req);
       const msg = createMessage(body);
       if (!msg) return send(res, 400, { error: 'empty message' });
+      // composer stays snappy: classify untagged notes in the background
+      if (!msg.tagIds.length && msg.text) classifyMessage(msg.id);
       return send(res, 201, msg);
     }
     if (method === 'PATCH' && id) {

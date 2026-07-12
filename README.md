@@ -39,6 +39,12 @@ Back up the `data/` folder and you've backed up everything. Settings also has on
 - Search by text or date with fuzzy matching (`/` focuses search); calendar button next to search filters by **created date or due date**
 - Pin, copy, edit, delete; to-do checklists; reminders with due nudges
 
+**AI (optional — one key in Settings → AI assistant)**
+- **Ask tab**: chat over your actual data; it can also act — edit tasks, move due dates, retag, create notes/reminders — via tool calls, with ✓ receipts for every change
+- **Voice cleanup**: transcriptions get LLM-cleaned before saving
+- **Auto-classification**: notes captured *without* tags get tags, a task flag, and any due date/time implied by the text ("pay rent friday evening" → task, Friday, 18:00). Explicit tags/dates are never overridden.
+- Works with any OpenAI-compatible API: OpenAI `gpt-4o-mini` (~pennies), Groq free tier (`https://api.groq.com/openai/v1`), or local Ollama (`http://localhost:11434/v1`)
+
 **Tasks vs notes**
 - A note becomes a **task** when: you add it from the week planner, tag it `#todo` / `#task`, or hit the calendar-check action on its card
 - Tasks render with a checkbox everywhere; checking one marks it done (strikethrough)

@@ -444,6 +444,16 @@ async function sendMessage() {
     renderComposeExtras();
     renderFeed();
     toast('Saved to your ' + APP_NAME);
+    // untagged notes get AI-classified in the background — pick up the result
+    if (!msg.tagIds.length && msg.text) {
+      setTimeout(async () => {
+        try {
+          await loadState();
+          renderTagbar();
+          renderCurrentView();
+        } catch {}
+      }, 3500);
+    }
   } catch (err) { toast(err.message); }
   updateSendState();
 }
