@@ -395,6 +395,15 @@ body.compact .imggrid img, body.compact .imggrid .filecard { height: 64px; }
 /* ---------------------------------------------------------------- ask (AI chat) */
 
 .chat-wrap { display: flex; flex-direction: column; height: calc(100dvh - 230px); min-height: 360px; }
+.chat-tools { display: flex; gap: 8px; align-items: flex-start; padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 6px; }
+.chat-tools .btn { flex: none; margin-left: auto; }
+.chat-autos { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; min-height: 4px; }
+.auto-chip { display: inline-flex; align-items: center; border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border)); border-radius: 999px; overflow: hidden; }
+.auto-chip .run { padding: 5px 4px 5px 12px; font-size: 12.5px; color: var(--accent); white-space: nowrap; }
+.auto-chip .run:active { background: var(--bg-hover); }
+.auto-chip .x { padding: 5px 9px 5px 5px; font-size: 10px; color: var(--text-faint); }
+.auto-chip .x:hover { color: var(--danger); }
+.save-auto { margin-top: 8px; border-style: dashed; }
 .chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; padding: 8px 2px 16px; }
 .chat-line .who, .chat-hello .who {
   display: block; font-size: 10.5px; letter-spacing: 2px; text-transform: uppercase;
@@ -409,9 +418,11 @@ body.compact .imggrid img, body.compact .imggrid .filecard { height: 64px; }
 .chat-suggest { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .chat-inputrow { display: flex; gap: 8px; align-items: flex-end; padding-top: 10px; border-top: 1px solid var(--border); }
 .chat-inputrow textarea {
-  flex: 1; resize: none; padding: 10px 14px; background: var(--bg-raised);
+  flex: 1; resize: none; padding: 11px 14px; background: var(--bg-raised);
   border: 1px solid var(--border); border-radius: 12px; outline: none; line-height: 1.5;
+  min-height: 46px; overflow: hidden;
 }
+.chat-inputrow .sendbtn { padding: 12px 18px; }
 .chat-inputrow textarea:focus { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .chat-typing span { animation: blink 1.2s infinite; }
 .chat-typing span:nth-child(2) { animation-delay: .2s; }
@@ -593,7 +604,9 @@ body.light .sheet-due input[type=date], body.light .sheet-due input[type=time] {
   .week-inbox .wi-cards { flex-direction: column; overflow-x: visible; padding-bottom: 6px; }
   .week-inbox .week-card, .week-inbox .w-add { width: 100%; }
 
-  .chat-wrap { height: calc(100dvh - 330px); min-height: 300px; }
+  .chat-wrap { height: calc(100dvh - 320px); min-height: 300px; }
+  .chat-inputrow { padding-bottom: 4px; }
+  .chat-inputrow textarea { min-height: 48px; }
   .cal-day { min-height: 54px; padding: 4px 5px; }
   .imggrid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
 }

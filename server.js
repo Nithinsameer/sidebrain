@@ -42,6 +42,7 @@ const DEFAULT_DB = {
     telegramChatId: '',     // Telegram chat id for the bot
     digestHour: 8,          // local hour for the daily task digest push (null = off)
   },
+  automations: [],// {id, name, prompt, createdAt} — replayable Ask prompts
   tags: [],       // {id, name, color, keywords[], parent, createdAt}
   messages: [],   // {id, text, createdAt, pinned, tagIds[], files[], list, checked[], canvas:{on,x,y}}
   reminders: [],  // {id, text, due, done, createdAt}
@@ -220,7 +221,7 @@ async function cleanupTranscript(text) {
           model,
           temperature: 0.2,
           messages: [
-            { role: 'system', content: 'You clean up voice-note transcriptions. Fix punctuation, casing, and obvious transcription errors; remove filler words (um, uh, like, you know); keep the meaning, wording, and any #hashtags exactly as intended; never add new content or commentary. Return ONLY the cleaned text.' },
+            { role: 'system', content: "You clean up voice-note transcriptions. Fix punctuation, casing, and obvious transcription errors; remove filler words (um, uh, like, you know); keep the meaning and wording; never add new content or commentary. When the speaker says 'hashtag X' (or it was transcribed as 'hashtag to-do', 'hash tag idea', etc.), write it as #x — lowercase, no spaces or hyphens (e.g. 'hashtag to-do' becomes #todo). Keep existing #hashtags as-is. Return ONLY the cleaned text." },
             { role: 'user', content: text },
           ],
         }),
@@ -689,6 +690,25 @@ async function handleApi(req, res, pathname) {
       'Content-Disposition': 'attachment; filename="sidebrain-export.csv"',
     });
     return res.end(csv);
+  }
+
+  // ---- automations: saved Ask prompts, replayable with one tap
+  if (resource === 'automations') {
+    if (method === 'POST') {
+      const body = await readBody(req);
+      const name = String(body.name || '').trim().slice(0, 60);
+      const prompt = String(body.prompt || '').trim().slice(0, 2000);
+      if (!name || !prompt) return send(res, 400, { error: 'name and prompt required' });
+      const auto = { id: uid(), name, prompt, createdAt: new Date().toISOString() };
+      db.automations.push(auto);
+      saveDb();
+      return send(res, 201, auto);
+    }
+    if (method === 'DELETE' && id) {
+      db.automations = db.automations.filter((a) => a.id !== id);
+      saveDb();
+      return send(res, 200, { ok: true });
+    }
   }
 
   // ---- ask: AI chat over the app's data, with tool-calling for edits

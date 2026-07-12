@@ -1408,6 +1408,7 @@ const CHAT_SUGGESTIONS = [
 UI.chat = []; // {role, content, actions?, error?}
 
 function renderAsk() {
+  renderAutomations();
   const log = $('#chatLog');
   if (!UI.chat.length) {
     log.innerHTML = `
@@ -1422,13 +1423,62 @@ function renderAsk() {
     });
     return;
   }
-  log.innerHTML = UI.chat.map((m) => `
+  log.innerHTML = UI.chat.map((m, i) => `
     <div class="chat-line ${m.role}">
       <span class="who">${m.role === 'user' ? 'you' : 'sidebrain'}</span>
       <div class="bubble ${m.error ? 'err-text' : ''}">${m.pending ? '<span class="chat-typing">thinking<span>.</span><span>.</span><span>.</span></span>' : richText(m.content)}</div>
       ${(m.actions || []).map((a) => `<div class="chat-act">✓ ${esc(a)}</div>`).join('')}
+      ${m.actions && m.actions.length && m.sourcePrompt ? `<button class="chip save-auto" data-chatidx="${i}">💾 Save as automation</button>` : ''}
     </div>`).join('');
+  $$('.save-auto', log).forEach((b) => b.onclick = () => openSaveAutomationModal(UI.chat[+b.dataset.chatidx].sourcePrompt));
   log.scrollTop = log.scrollHeight;
+}
+
+function renderAutomations() {
+  const root = $('#chatAutos');
+  root.innerHTML = (S.automations || []).map((a) => `
+    <span class="chip auto-chip" data-id="${a.id}" title="${esc(a.prompt)}">
+      <button class="run" data-run>▶ ${esc(a.name)}</button><button class="x" data-del title="Delete automation">✕</button>
+    </span>`).join('');
+  $$('.auto-chip', root).forEach((chipEl) => {
+    const auto = (S.automations || []).find((a) => a.id === chipEl.dataset.id);
+    $('[data-run]', chipEl).onclick = () => {
+      $('#chatInput').value = auto.prompt;
+      sendChat();
+    };
+    $('[data-del]', chipEl).onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete automation "${auto.name}"?`)) return;
+      S.automations = S.automations.filter((a) => a.id !== auto.id);
+      renderAutomations();
+      api('DELETE', 'automations/' + auto.id).catch(() => toast('Failed to delete'));
+    };
+  });
+}
+
+function openSaveAutomationModal(prompt) {
+  const box = openModal(`
+    <h2>Save as automation</h2>
+    <p class="sub">One tap re-runs this instruction against your latest data — it redoes the intent, not the literal old edits.</p>
+    <div class="field"><label>Button name</label>
+      <input type="text" id="autoName" maxlength="40" value="${esc(prompt.slice(0, 32))}" /></div>
+    <div class="field"><label>Instruction</label>
+      <textarea id="autoPrompt" rows="3">${esc(prompt)}</textarea></div>
+    <div class="err" id="autoErr"></div>
+    <div class="footrow"><button class="btn primary" id="autoSave">Save</button></div>`);
+  $('#autoName', box).focus();
+  $('#autoSave', box).onclick = async () => {
+    const name = $('#autoName', box).value.trim();
+    const p = $('#autoPrompt', box).value.trim();
+    if (!name || !p) return showErr(box, 'Name and instruction are both required.');
+    try {
+      const auto = await api('POST', 'automations', { name, prompt: p });
+      (S.automations ||= []).push(auto);
+      closeModal();
+      renderAutomations();
+      toast('Automation saved — it lives at the top of Ask');
+    } catch (err) { showErr(box, err.message); }
+  };
 }
 
 async function sendChat() {
@@ -1439,7 +1489,7 @@ async function sendChat() {
   input.value = '';
   input.style.height = 'auto';
   UI.chat.push({ role: 'user', content: text });
-  const pending = { role: 'assistant', content: '', pending: true };
+  const pending = { role: 'assistant', content: '', pending: true, sourcePrompt: text };
   UI.chat.push(pending);
   renderAsk();
   try {
@@ -1565,8 +1615,25 @@ async function boot() {
   $('.lb-next').addEventListener('click', () => stepLightbox(1));
   $('#lightbox').addEventListener('click', (e) => { if (e.target.id === 'lightbox') closeLightbox(); });
 
+  // refresh: manual button + automatic when the PWA returns to foreground
+  const doRefresh = async (quiet) => {
+    try {
+      await loadState();
+      renderAll();
+      if (!quiet) toast('Refreshed');
+    } catch { if (!quiet) toast('Refresh failed'); }
+  };
+  $('#btnRefresh').addEventListener('click', () => doRefresh(false));
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') doRefresh(true);
+  });
+
   // ask chat
   const chatInput = $('#chatInput');
+  $('#chatReset').addEventListener('click', () => {
+    UI.chat = [];
+    renderAsk();
+  });
   $('#chatSend').addEventListener('click', sendChat);
   chatInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
