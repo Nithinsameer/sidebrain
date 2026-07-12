@@ -236,6 +236,11 @@ function aiConfig() {
 // Clean up a raw voice transcription. Uses the AI when a key is present,
 // otherwise falls back to light heuristics.
 async function cleanupTranscript(text) {
+  const raw = String(text || '').trim();
+  // Shared links / anything containing a URL is not a transcription — never let
+  // the model rewrite it (it tends to reply "I can't open links"). Keep verbatim.
+  if (/https?:\/\/\S+/i.test(raw)) return raw;
+
   const { key, base, model } = aiConfig();
   if (key) {
     try {
@@ -246,19 +251,22 @@ async function cleanupTranscript(text) {
           model,
           temperature: 0.2,
           messages: [
-            { role: 'system', content: "You clean up voice-note transcriptions. Fix punctuation, casing, and obvious transcription errors; remove filler words (um, uh, like, you know); keep the meaning and wording; never add new content or commentary. When the speaker says 'hashtag X' (or it was transcribed as 'hashtag to-do', 'hash tag idea', etc.), write it as #x — lowercase, no spaces or hyphens (e.g. 'hashtag to-do' becomes #todo). Keep existing #hashtags as-is. Return ONLY the cleaned text." },
-            { role: 'user', content: text },
+            { role: 'system', content: "You clean up voice-note transcriptions. Fix punctuation, casing, and obvious transcription errors; remove filler words (um, uh, like, you know); keep the meaning and wording; never add new content or commentary. When the speaker says 'hashtag X' (or it was transcribed as 'hashtag to-do', 'hash tag idea', etc.), write it as #x — lowercase, no spaces or hyphens (e.g. 'hashtag to-do' becomes #todo). Keep existing #hashtags as-is. Return ONLY the cleaned text, with no preface or explanation." },
+            { role: 'user', content: raw },
           ],
         }),
       });
       if (r.ok) {
         const j = await r.json();
         const out = j.choices?.[0]?.message?.content?.trim();
-        if (out) return out;
+        // guard: if the model replied conversationally (apology / meta) instead
+        // of cleaning, discard it and keep the original text
+        const refusal = /\b(i'?m sorry|i can'?t|i cannot|as an ai|i'?m unable|provide the (text|voice|note)|please provide|i don'?t have access)\b/i;
+        if (out && !refusal.test(out)) return out;
       }
     } catch { /* fall through to heuristics */ }
   }
-  let t = String(text || '')
+  let t = raw
     .replace(/\b(u+m+|u+h+|erm+)\b[,.]?\s*/gi, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim();

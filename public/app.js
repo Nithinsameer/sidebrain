@@ -1687,7 +1687,7 @@ function renderFolder() {
 
 const WORKOUTS = ['push', 'pull', 'legs', 'upper', 'lower', 'other'];
 const WORKOUT_COLORS = { push: '#3cf58c', pull: '#0ea5e9', legs: '#f59e0b', upper: '#d946ef', lower: '#14b8a6', other: '#94a3b8' };
-UI.habitRange = 30;
+UI.habitRange = 90;
 
 function habitDays(n) {
   return [...Array(n)].map((_, i) => {
@@ -1774,25 +1774,59 @@ function renderHabitCharts() {
     </svg>`;
   };
 
-  // gym consistency grid — last 12 weeks, GitHub-style
-  const gridDays = habitDays(12 * 7);
-  const cells = gridDays.map((d, i) => {
-    const g = H[d] || {};
-    const col = Math.floor(i / 7), row = i % 7;
-    const c = g.gym ? (WORKOUT_COLORS[g.workout] || 'var(--accent)') : 'color-mix(in srgb, var(--text) 10%, transparent)';
-    return `<rect x="${col * 13}" y="${row * 13}" width="10" height="10" rx="2.5" fill="${c}"><title>${d}${g.gym ? ' — ' + (g.workout || 'gym') : ''}</title></rect>`;
-  }).join('');
-  const gymCount = gridDays.filter((d) => (H[d] || {}).gym).length;
+  // gym consistency grid — calendar-aligned (Mon-start columns), 13 weeks,
+  // with month + weekday labels and tappable cells (hover tooltips don't work on phones)
+  const WEEKS = 13, CELL = 15, PADX = 34, PADY = 18;
+  const today0 = new Date(); today0.setHours(0, 0, 0, 0);
+  const gStart = new Date(today0);
+  gStart.setDate(gStart.getDate() - ((today0.getDay() + 6) % 7) - (WEEKS - 1) * 7); // Monday, 13 weeks back
+  let cells = '', monthLabels = '', gymCount = 0;
+  const monthSeen = new Set();
+  for (let w = 0; w < WEEKS; w++) {
+    for (let r = 0; r < 7; r++) {
+      const d = new Date(gStart);
+      d.setDate(gStart.getDate() + w * 7 + r);
+      const key = dayKey(d.toISOString());
+      const future = d > today0;
+      const g = H[key] || {};
+      if (g.gym) gymCount++;
+      const fill = future ? 'transparent'
+        : g.gym ? (WORKOUT_COLORS[g.workout] || 'var(--accent)')
+        : 'color-mix(in srgb, var(--text) 8%, transparent)';
+      const x = PADX + w * CELL, y = PADY + r * CELL;
+      cells += `<rect data-gday="${key}" x="${x}" y="${y}" width="${CELL - 3}" height="${CELL - 3}" rx="3" fill="${fill}"${future ? '' : ' style="cursor:pointer"'} />`;
+      if (r === 0 && !future && d.getDate() <= 7) {
+        const mk = d.getFullYear() + '-' + d.getMonth();
+        if (!monthSeen.has(mk)) { monthSeen.add(mk); monthLabels += `<text x="${x}" y="13" class="ax">${d.toLocaleDateString(undefined, { month: 'short' })}</text>`; }
+      }
+    }
+  }
+  const wdLabels = ['Mon', '', 'Wed', '', 'Fri', '', ''].map((l, r) => l ? `<text x="2" y="${PADY + r * CELL + 11}" class="ax">${l}</text>` : '').join('');
+  const gridW = PADX + WEEKS * CELL, gridH = PADY + 7 * CELL;
 
   $('#habitCharts').innerHTML = `
     <div class="habit-card"><div class="hc-title">// weight</div>${weightSvg}</div>
     <div class="habit-card"><div class="hc-title">// steps</div>${bars('steps', '#0ea5e9')}</div>
     <div class="habit-card"><div class="hc-title">// calories burnt</div>${bars('calories', '#f59e0b')}</div>
     <div class="habit-card">
-      <div class="hc-title">// gym — ${gymCount} sessions in 12 weeks</div>
-      <svg viewBox="0 0 ${12 * 13} ${7 * 13 - 3}" class="hgrid">${cells}</svg>
+      <div class="hc-title">// gym — ${gymCount} sessions in 13 weeks</div>
+      <svg viewBox="0 0 ${gridW} ${gridH}" class="hgrid">${monthLabels}${wdLabels}${cells}</svg>
+      <div class="hc-daydetail" id="gymDetail">Tap any square to see its day.</div>
       <div class="hc-legend">${WORKOUTS.map((w) => `<span><i style="background:${WORKOUT_COLORS[w]}"></i>${w}</span>`).join('')}</div>
     </div>`;
+
+  $$('#habitCharts .hgrid rect[data-gday]').forEach((rect) => rect.onclick = () => {
+    const key = rect.dataset.gday;
+    const g = (S.habits || {})[key] || {};
+    const dt = new Date(key + 'T12:00');
+    const bits = [g.gym ? '🏋 ' + (g.workout || 'gym') : 'rest day'];
+    if (g.steps) bits.push(g.steps.toLocaleString() + ' steps');
+    if (g.calories) bits.push(g.calories + ' cal');
+    if (g.weight) bits.push(g.weight + ' lb');
+    $('#gymDetail').textContent = dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) + ' — ' + bits.join(' · ');
+    $$('#habitCharts .hgrid rect').forEach((r) => r.classList.remove('sel'));
+    rect.classList.add('sel');
+  });
 }
 
 // ---------------------------------------------------------------- ask (AI chat)

@@ -417,7 +417,9 @@ body.compact .imggrid img, body.compact .imggrid .filecard { height: 64px; }
 .hc-nums .btn { align-self: flex-end; }
 .hchart { width: 100%; height: auto; display: block; }
 .hchart .ax { font-size: 9px; fill: var(--text-faint); font-family: inherit; }
-.hgrid { max-width: 340px; display: block; }
+.hgrid { max-width: 300px; display: block; }
+.hgrid rect.sel { stroke: var(--text); stroke-width: 1.5; }
+.hc-daydetail { margin-top: 10px; font-size: 12.5px; color: var(--text-dim); min-height: 18px; }
 .hc-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; font-size: 10.5px; color: var(--text-faint); }
 .hc-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
 .hc-empty { color: var(--text-faint); font-size: 12.5px; padding: 8px 0; }
