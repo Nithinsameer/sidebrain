@@ -43,6 +43,7 @@ const DEFAULT_DB = {
     digestHour: 8,          // local hour for the daily task digest push (null = off)
   },
   automations: [],// {id, name, prompt, createdAt} — replayable Ask prompts
+  circulations: [],// {id, name, prompt, hour, day('daily'|0-6), enabled, lastRun, lastError}
   tags: [],       // {id, name, color, keywords[], parent, createdAt}
   messages: [],   // {id, text, createdAt, pinned, tagIds[], files[], list, checked[], canvas:{on,x,y}}
   reminders: [],  // {id, text, due, done, createdAt}
@@ -68,6 +69,28 @@ if (!db.settings.captureToken) {
 for (const m of db.messages) {
   if (m.task === undefined) m.task = !!m.plannedFor;
   m.done = !!m.done;
+}
+
+// purge trash older than 30 days
+{
+  const cutoff = Date.now() - 30 * 86400000;
+  db.messages = db.messages.filter((m) => !m.deletedAt || Date.parse(m.deletedAt) > cutoff);
+}
+
+// seed default circulations once (morning briefing absorbs the plain digest)
+if (!db.settings.circSeeded) {
+  db.settings.circSeeded = true;
+  db.circulations.push(
+    {
+      id: crypto.randomUUID(), name: 'Morning briefing', day: 'daily', hour: 8, enabled: true, lastRun: null, lastError: null,
+      prompt: "Morning briefing: list today's tasks (with times) and anything overdue, as a tight list. Then pick one interesting older note from my archive (2+ weeks old), quote it briefly, and say in one line why it might matter today. Do not make any changes to my data.",
+    },
+    {
+      id: crypto.randomUUID(), name: 'Weekly review', day: 0, hour: 18, enabled: true, lastRun: null, lastError: null,
+      prompt: 'Weekly review: summarize what I captured this week by theme, list what I completed, and call out tasks that keep slipping (overdue or repeatedly moved). Suggest at most 3 concrete next actions for the coming week. Do not make any changes to my data.',
+    },
+  );
+  if (db.settings.digestHour === 8) db.settings.digestHour = null; // briefing replaces it
 }
 
 function saveDb() {
@@ -298,6 +321,88 @@ function localDay(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// ---------------------------------------------------------------- nightly backup
+
+const BACKUP_DIR = path.join(DATA_DIR, 'backups');
+
+function dailyBackup(now) {
+  const today = localDay(now);
+  if (db.settings.lastBackupDay === today || now.getHours() < 3) return;
+  db.settings.lastBackupDay = today;
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    fs.writeFileSync(path.join(BACKUP_DIR, `db-${today}.json`), JSON.stringify(db, null, 2));
+    const old = fs.readdirSync(BACKUP_DIR).filter((f) => /^db-\d{4}-\d{2}-\d{2}\.json$/.test(f)).sort();
+    for (const f of old.slice(0, -14)) fs.unlinkSync(path.join(BACKUP_DIR, f)); // keep last 14
+  } catch { /* best effort */ }
+  saveDb();
+}
+
+// ---------------------------------------------------------------- discord queued capture
+
+// A Discord bot polls a capture channel: anything you message there becomes a
+// note. Discord holds messages while this machine is asleep, so nothing is lost.
+let discordPolling = false;
+async function pollDiscordCapture() {
+  const token = String(db.settings.discordBotToken || '').trim();
+  const chan = String(db.settings.discordCaptureChannel || '').trim();
+  if (!token || !chan || discordPolling) return;
+  discordPolling = true;
+  try {
+    const auth = { Authorization: 'Bot ' + token };
+    const last = db.settings.discordLastMsgId;
+    if (!last) {
+      // first run: set the baseline so old channel history isn't ingested
+      const r = await fetch(`https://discord.com/api/v10/channels/${chan}/messages?limit=1`, { headers: auth });
+      if (r.ok) {
+        const [latest] = await r.json();
+        db.settings.discordLastMsgId = latest ? latest.id : '0';
+        saveDb();
+      }
+      return;
+    }
+    const r = await fetch(`https://discord.com/api/v10/channels/${chan}/messages?limit=50&after=${last}`, { headers: auth });
+    if (!r.ok) return;
+    const msgs = await r.json();
+    if (!Array.isArray(msgs) || !msgs.length) return;
+    for (const dm of msgs.reverse()) { // oldest first
+      db.settings.discordLastMsgId = dm.id;
+      const text = String(dm.content || '').trim();
+      if (dm.author?.bot || dm.webhook_id || !text) continue;
+      const msg = createMessage({ text });
+      if (msg && !msg.tagIds.length) await classifyMessage(msg.id);
+      fetch(`https://discord.com/api/v10/channels/${chan}/messages/${dm.id}/reactions/${encodeURIComponent('✅')}/@me`, { method: 'PUT', headers: auth }).catch(() => {});
+    }
+    saveDb();
+  } catch { /* transient network errors are fine */ }
+  finally { discordPolling = false; }
+}
+setInterval(pollDiscordCapture, 45000);
+
+// ---------------------------------------------------------------- circulations (scheduled AI runs)
+
+function runCirculations(now) {
+  const today = localDay(now);
+  for (const c of db.circulations) {
+    if (!c.enabled || c.lastRun === today) continue;
+    if (now.getHours() !== c.hour) continue;
+    if (c.day !== 'daily' && Number(c.day) !== now.getDay()) continue;
+    c.lastRun = today;
+    saveDb();
+    runAgentTurn([{ role: 'user', content: c.prompt }])
+      .then(({ reply, actions }) => {
+        c.lastError = null;
+        saveDb();
+        const body = reply + (actions.length ? '\n\nChanges:\n' + actions.map((a) => '- ' + a).join('\n') : '');
+        notifyAll(c.name, body.slice(0, 3500), 'high');
+      })
+      .catch((e) => {
+        c.lastError = String(e.message || e).slice(0, 200);
+        saveDb();
+      });
+  }
+}
+
 function anyChannelConfigured() {
   return !!(String(db.settings.ntfyTopic || '').trim() ||
     String(db.settings.discordWebhook || '').trim() ||
@@ -305,8 +410,10 @@ function anyChannelConfigured() {
 }
 
 setInterval(() => {
-  if (!anyChannelConfigured()) return;
   const now = new Date();
+  dailyBackup(now);
+  runCirculations(now);
+  if (!anyChannelConfigured()) return;
 
   // exact-time reminder pushes
   for (const r of db.reminders) {
@@ -320,7 +427,7 @@ setInterval(() => {
 
   // exact-time task pushes (tasks with a due time; "YYYY-MM-DDTHH:MM" parses as local time)
   for (const m of db.messages) {
-    if (!m.task || m.done || m.taskNotified || !m.plannedFor || !m.dueTime) continue;
+    if (m.deletedAt || !m.task || m.done || m.taskNotified || !m.plannedFor || !m.dueTime) continue;
     const t = Date.parse(`${m.plannedFor}T${m.dueTime}`);
     if (!isNaN(t) && t <= now.getTime()) {
       m.taskNotified = true;
@@ -335,7 +442,7 @@ setInterval(() => {
   if (Number.isInteger(dh) && now.getHours() === dh && db.settings.lastDigestDay !== today) {
     db.settings.lastDigestDay = today;
     saveDb();
-    const open = db.messages.filter((m) => m.task && !m.done && m.plannedFor && m.plannedFor <= today);
+    const open = db.messages.filter((m) => !m.deletedAt && m.task && !m.done && m.plannedFor && m.plannedFor <= today);
     if (open.length) {
       const line = (m) => '- ' + m.text.split('\n')[0].slice(0, 80) + (m.dueTime ? ` @ ${m.dueTime}` : '');
       const todays = open.filter((m) => m.plannedFor === today);
@@ -406,9 +513,9 @@ function applyChatTool(name, args) {
   const msg = db.messages.find((m) => m.id === args.id || m.id.startsWith(String(args.id || '')));
   if (name === 'delete_note') {
     if (!msg) return { ok: false, error: 'not found' };
-    db.messages = db.messages.filter((m) => m.id !== args.id);
+    msg.deletedAt = new Date().toISOString(); // AI deletions go to trash too
     saveDb();
-    return { ok: true, summary: `deleted "${brief(msg.text)}"` };
+    return { ok: true, summary: `moved "${brief(msg.text)}" to trash` };
   }
   if (name === 'update_note') {
     if (!msg) return { ok: false, error: 'not found' };
@@ -478,6 +585,7 @@ Rules: 0-2 tags; STRONGLY prefer existing tags; at most one new tag (single lowe
 function chatSystemPrompt() {
   const tagName = (id) => (db.tags.find((t) => t.id === id) || {}).name;
   const lines = [...db.messages]
+    .filter((m) => !m.deletedAt)
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
     .slice(0, 250)
     .map((m) => {
@@ -499,6 +607,46 @@ OPEN REMINDERS:
 ${rems.join('\n') || '(none)'}
 
 TAGS: ${db.tags.map((t) => t.name).join(', ') || '(none)'}`;
+}
+
+// One full agent turn: system prompt + history → (tool calls → apply)* → reply.
+// Used by the Ask tab and by scheduled circulations. Throws on failure.
+async function runAgentTurn(history) {
+  const { key, base, model } = aiConfig();
+  if (!key) {
+    const err = new Error('No AI key configured. Open Settings → AI assistant and paste an OpenAI API key (or a Groq key with its base URL).');
+    err.statusCode = 400;
+    throw err;
+  }
+  const msgs = [{ role: 'system', content: chatSystemPrompt() }, ...history];
+  const actions = [];
+  for (let step = 0; step < 6; step++) {
+    const r = await fetch(base + '/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
+      body: JSON.stringify({ model, messages: msgs, tools: CHAT_TOOLS, tool_choice: 'auto', temperature: 0.3 }),
+    });
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      throw new Error(`AI request failed (${r.status}): ${t.slice(0, 300)}`);
+    }
+    const j = await r.json();
+    const msg = j.choices?.[0]?.message;
+    if (!msg) throw new Error('AI returned an empty response.');
+    msgs.push(msg);
+    if (msg.tool_calls?.length) {
+      for (const tc of msg.tool_calls) {
+        let out;
+        try { out = applyChatTool(tc.function.name, JSON.parse(tc.function.arguments || '{}')); }
+        catch (e) { out = { ok: false, error: String(e.message || e) }; }
+        if (out.summary) actions.push(out.summary);
+        msgs.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(out) });
+      }
+      continue;
+    }
+    return { reply: msg.content || '', actions };
+  }
+  return { reply: 'I stopped after several steps — the changes so far are listed below.', actions };
 }
 
 function csvEscape(v) {
@@ -593,6 +741,7 @@ async function handleApi(req, res, pathname) {
       }
       if ('tagIds' in body) msg.tagIds = [...new Set(body.tagIds)];
       for (const k of ['pinned', 'list', 'checked', 'canvas', 'task', 'done']) if (k in body) msg[k] = body[k];
+      if (body.restore) msg.deletedAt = null;
       if ('plannedFor' in body) msg.plannedFor = DAY_RE.test(body.plannedFor || '') ? body.plannedFor : null;
       if ('dueTime' in body) msg.dueTime = TIME_RE.test(body.dueTime || '') ? body.dueTime : null;
       // rescheduling re-arms the exact-time push
@@ -602,7 +751,12 @@ async function handleApi(req, res, pathname) {
       return send(res, 200, msg);
     }
     if (method === 'DELETE' && id) {
-      db.messages = db.messages.filter((m) => m.id !== id);
+      const msg = db.messages.find((m) => m.id === id);
+      if (msg && !msg.deletedAt) {
+        msg.deletedAt = new Date().toISOString(); // soft delete → trash (30 days)
+      } else {
+        db.messages = db.messages.filter((m) => m.id !== id); // second delete = forever
+      }
       saveDb();
       return send(res, 200, { ok: true });
     }
@@ -681,7 +835,7 @@ async function handleApi(req, res, pathname) {
   if (resource === 'export.csv' && method === 'GET') {
     const tagName = (tid) => (db.tags.find((t) => t.id === tid) || {}).name || '';
     const rows = [['created_at', 'text', 'tags', 'pinned', 'attachments']];
-    for (const m of db.messages) {
+    for (const m of db.messages.filter((x) => !x.deletedAt)) {
       rows.push([m.createdAt, m.text, m.tagIds.map(tagName).filter(Boolean).join('; '), m.pinned ? 'yes' : 'no', (m.files || []).map((f) => f.name).join('; ')]);
     }
     const csv = rows.map((r) => r.map(csvEscape).join(',')).join('\n');
@@ -713,46 +867,54 @@ async function handleApi(req, res, pathname) {
 
   // ---- ask: AI chat over the app's data, with tool-calling for edits
   if (resource === 'chat' && method === 'POST') {
-    const { key, base, model } = aiConfig();
-    if (!key) return send(res, 400, { error: 'No AI key configured. Open Settings → AI assistant and paste an OpenAI API key (or a Groq key with its base URL).' });
     const body = await readBody(req);
     const history = (Array.isArray(body.messages) ? body.messages : [])
       .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
       .slice(-16);
-    const msgs = [{ role: 'system', content: chatSystemPrompt() }, ...history];
-    const actions = [];
-    for (let step = 0; step < 6; step++) {
-      let r;
-      try {
-        r = await fetch(base + '/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
-          body: JSON.stringify({ model, messages: msgs, tools: CHAT_TOOLS, tool_choice: 'auto', temperature: 0.3 }),
-        });
-      } catch (e) {
-        return send(res, 502, { error: 'Could not reach the AI API: ' + String(e.message || e) });
-      }
-      if (!r.ok) {
-        const t = await r.text().catch(() => '');
-        return send(res, 502, { error: `AI request failed (${r.status}): ${t.slice(0, 300)}` });
-      }
-      const j = await r.json();
-      const msg = j.choices?.[0]?.message;
-      if (!msg) return send(res, 502, { error: 'AI returned an empty response.' });
-      msgs.push(msg);
-      if (msg.tool_calls?.length) {
-        for (const tc of msg.tool_calls) {
-          let out;
-          try { out = applyChatTool(tc.function.name, JSON.parse(tc.function.arguments || '{}')); }
-          catch (e) { out = { ok: false, error: String(e.message || e) }; }
-          if (out.summary) actions.push(out.summary);
-          msgs.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(out) });
-        }
-        continue;
-      }
-      return send(res, 200, { reply: msg.content || '', actions });
+    try {
+      const result = await runAgentTurn(history);
+      return send(res, 200, result);
+    } catch (e) {
+      return send(res, e.statusCode || 502, { error: String(e.message || e) });
     }
-    return send(res, 200, { reply: 'I stopped after several steps — the changes so far are listed below.', actions });
+  }
+
+  // ---- circulations: scheduled AI runs
+  if (resource === 'circulations') {
+    if (method === 'POST') {
+      const body = await readBody(req);
+      const c = {
+        id: uid(),
+        name: String(body.name || '').trim().slice(0, 60) || 'Untitled',
+        prompt: String(body.prompt || '').trim().slice(0, 3000),
+        hour: Math.max(0, Math.min(23, +body.hour || 8)),
+        day: body.day === 'daily' ? 'daily' : Math.max(0, Math.min(6, +body.day || 0)),
+        enabled: body.enabled !== false,
+        lastRun: null,
+        lastError: null,
+      };
+      if (!c.prompt) return send(res, 400, { error: 'prompt required' });
+      db.circulations.push(c);
+      saveDb();
+      return send(res, 201, c);
+    }
+    if (method === 'PATCH' && id) {
+      const c = db.circulations.find((x) => x.id === id);
+      if (!c) return send(res, 404, { error: 'not found' });
+      const body = await readBody(req);
+      if ('name' in body) c.name = String(body.name).trim().slice(0, 60) || c.name;
+      if ('prompt' in body) c.prompt = String(body.prompt).trim().slice(0, 3000) || c.prompt;
+      if ('hour' in body) c.hour = Math.max(0, Math.min(23, +body.hour || 0));
+      if ('day' in body) c.day = body.day === 'daily' ? 'daily' : Math.max(0, Math.min(6, +body.day || 0));
+      if ('enabled' in body) c.enabled = !!body.enabled;
+      saveDb();
+      return send(res, 200, c);
+    }
+    if (method === 'DELETE' && id) {
+      db.circulations = db.circulations.filter((x) => x.id !== id);
+      saveDb();
+      return send(res, 200, { ok: true });
+    }
   }
 
   // ---- ntfy: save topic + send a test push

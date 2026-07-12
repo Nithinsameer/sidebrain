@@ -136,8 +136,16 @@ function applySettings() {
 
 // ---------------------------------------------------------------- filtering
 
+const ARCHIVE_AGE_MS = 14 * 86400000;
+
+// old, unpinned, non-open-task notes count as archived and hide from the feed
+function isArchived(m) {
+  if (m.pinned || (m.task && !m.done)) return false;
+  return Date.now() - Date.parse(m.createdAt) > ARCHIVE_AGE_MS;
+}
+
 function visibleMessages() {
-  let msgs = [...S.messages];
+  let msgs = S.messages.filter((m) => !m.deletedAt);
   if (UI.activeTags.size) {
     msgs = msgs.filter((m) => m.tagIds.some((id) => UI.activeTags.has(id)));
   }
@@ -290,7 +298,12 @@ async function hydrateLinkTitles(root) {
 
 function renderFeed() {
   const root = $('#feedGroups');
-  const msgs = visibleMessages();
+  let msgs = visibleMessages();
+
+  // hide the archive unless toggled on — but any active filter searches everything
+  const filtering = UI.search || UI.activeTags.size || UI.dateFilter.date;
+  const archivedCount = msgs.filter(isArchived).length;
+  if (!filtering && !UI.showArchive) msgs = msgs.filter((m) => !isArchived(m));
 
   if (!msgs.length) {
     const filtered = UI.search || UI.activeTags.size || UI.dateFilter.date;
@@ -307,7 +320,10 @@ function renderFeed() {
 
   // one flat card dump: pinned first, then newest first
   const sorted = [...msgs].sort((a, b) => (b.pinned - a.pinned) || (new Date(b.createdAt) - new Date(a.createdAt)));
-  root.innerHTML = `<div class="masonry">${sorted.map((m) => cardHtml(m)).join('')}</div>`;
+  root.innerHTML = `<div class="masonry">${sorted.map((m) => cardHtml(m)).join('')}</div>` +
+    (!filtering && archivedCount ? `<div class="archbar"><button class="chip ghost" id="btnArchiveToggle">🗄 ${UI.showArchive ? 'Hide archive' : `Show archive (${archivedCount})`}</button></div>` : '');
+  const at = $('#btnArchiveToggle');
+  if (at) at.onclick = () => { UI.showArchive = !UI.showArchive; renderFeed(); };
   hydrateLinkTitles(root);
 }
 
@@ -397,11 +413,10 @@ async function handleCardAction(act, id) {
       await api('PATCH', 'messages/' + id, { canvas: m.canvas });
       toast(m.canvas.on ? 'Added to canvas' : 'Removed from canvas');
     } else if (act === 'del') {
-      if (!confirm('Delete this note?')) return;
-      S.messages = S.messages.filter((x) => x.id !== id);
+      m.deletedAt = new Date().toISOString(); // soft delete — recoverable from Settings → Trash
       renderCurrentView();
       await api('DELETE', 'messages/' + id);
-      toast('Note deleted');
+      toast('Moved to trash');
     }
   } catch (err) { toast(err.message); }
 }
@@ -708,7 +723,7 @@ function openCardSheet(m) {
       <button data-s="todo"><span class="ic">☑️</span>${m.list ? 'Turn checklist off' : 'Turn into checklist'}<span class="hint">a checkbox per line</span></button>
       <button data-s="week"><span class="ic">📅</span>${m.task ? 'Remove from week planner' : 'Send to week planner'}<span class="hint">${m.task ? '' : 'lands in Inbox'}</span></button>
       <button data-s="copy"><span class="ic">📋</span>Copy text</button>
-      <button data-s="del" class="danger"><span class="ic">🗑️</span>Delete note</button>
+      <button data-s="del" class="danger"><span class="ic">🗑️</span>Move to trash<span class="hint">recoverable for 30 days</span></button>
     </div>`);
 
   $$('.sheet-rows [data-s]', box).forEach((b) => b.onclick = async () => {
@@ -910,7 +925,28 @@ function openSettingsModal() {
     </div>
 
     <div class="setrow">
-      <div class="info"><b>Export ${APP_NAME}</b><span>Download all your notes as a CSV file.</span></div>
+      <div class="info"><b>Circulations</b><span>Scheduled AI runs (morning briefing, weekly review, ...) pushed to your phone.</span></div>
+      <button class="btn" id="openCirculations">Manage</button>
+    </div>
+
+    <div class="setrow" style="flex-wrap:wrap">
+      <div class="info"><b>Discord capture</b><span>Queued capture: message your capture channel from anywhere — Discord holds it until this Mac picks it up (✅ = saved). Needs a bot token + channel ID.</span></div>
+      <div style="display:flex;gap:8px;width:100%;margin-top:4px">
+        <input type="password" id="dcBotToken" placeholder="bot token" value="${esc(S.settings.discordBotToken || '')}"
+          style="flex:1.2;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:10px;outline:none" />
+        <input type="text" id="dcChannel" placeholder="channel ID" value="${esc(S.settings.discordCaptureChannel || '')}"
+          style="flex:.8;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:10px;outline:none" />
+        <button class="btn" id="dcSave">Save</button>
+      </div>
+    </div>
+
+    <div class="setrow">
+      <div class="info"><b>Trash</b><span>Deleted notes are recoverable for 30 days.</span></div>
+      <button class="btn" id="openTrash">Open trash (${S.messages.filter((m) => m.deletedAt).length})</button>
+    </div>
+
+    <div class="setrow">
+      <div class="info"><b>Export ${APP_NAME}</b><span>Download all your notes as a CSV file. Nightly snapshots land in <b>data/backups/</b> (last 14 kept).</span></div>
       <a class="btn" href="/api/export.csv" download>Export CSV</a>
     </div>
 
@@ -974,6 +1010,17 @@ function openSettingsModal() {
     toast(this.value === '' ? 'Digest off' : 'Digest set for ' + this.options[this.selectedIndex].text);
   };
 
+  $('#openTrash', box).onclick = openTrashModal;
+  $('#openCirculations', box).onclick = openCirculationsModal;
+  $('#dcSave', box).onclick = () => {
+    patchSettings({
+      discordBotToken: $('#dcBotToken', box).value.trim(),
+      discordCaptureChannel: $('#dcChannel', box).value.trim(),
+      discordLastMsgId: null, // re-baseline so old history isn't ingested
+    });
+    toast($('#dcBotToken', box).value.trim() ? 'Discord capture saved — message the channel to test' : 'Discord capture off');
+  };
+
   $('#aiSave', box).onclick = () => {
     patchSettings({
       openaiKey: $('#aiKey', box).value.trim(),
@@ -1026,6 +1073,122 @@ function openSettingsModal() {
     $$('[data-font]', box).forEach((x) => x.classList.toggle('on', x === b));
     patchSettings({ font: b.dataset.font });
   });
+}
+
+// ---- trash
+function openTrashModal() {
+  const deleted = S.messages.filter((m) => m.deletedAt).sort((a, b) => new Date(b.deletedAt) - new Date(a.deletedAt));
+  const box = openModal(`
+    <h2>Trash</h2>
+    <p class="sub">Notes stay here for 30 days, then they're gone for good.</p>
+    <div id="trashRows">${deleted.length ? deleted.map((m) => `
+      <div class="tagrow" data-id="${m.id}">
+        <div style="flex:1;min-width:0">
+          <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(m.text.split('\n')[0] || '(attachment)')}</div>
+          <div class="kw">deleted ${fmtTime(m.deletedAt)}</div>
+        </div>
+        <button class="btn" data-restore>Restore</button>
+        <button class="btn danger" data-forever>Delete forever</button>
+      </div>`).join('') : '<p class="sub">Trash is empty.</p>'}
+    </div>`);
+  $$('#trashRows .tagrow', box).forEach((row) => {
+    const id = row.dataset.id;
+    const m = S.messages.find((x) => x.id === id);
+    $('[data-restore]', row).onclick = async () => {
+      m.deletedAt = null;
+      await api('PATCH', 'messages/' + id, { restore: true });
+      openTrashModal();
+      renderAll();
+      toast('Restored');
+    };
+    $('[data-forever]', row).onclick = async () => {
+      if (!confirm('Delete forever? This cannot be undone.')) return;
+      S.messages = S.messages.filter((x) => x.id !== id);
+      await api('DELETE', 'messages/' + id); // already trashed → permanent
+      openTrashModal();
+      toast('Deleted forever');
+    };
+  });
+}
+
+// ---- circulations (scheduled AI runs)
+const DAY_LABELS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const hourLabel = (h) => `${h % 12 || 12} ${h >= 12 ? 'PM' : 'AM'}`;
+
+function openCirculationsModal() {
+  const list = S.circulations || [];
+  const box = openModal(`
+    <h2>Circulations</h2>
+    <p class="sub">Scheduled AI runs. Results are pushed to your notification channels; any data changes are listed in the push. Needs the Mac awake at run time.</p>
+    <div id="circRows">${list.length ? list.map((c) => `
+      <div class="tagrow" data-id="${c.id}">
+        <button class="switch ${c.enabled ? 'on' : ''}" data-toggle title="Enable/disable"></button>
+        <div style="flex:1;min-width:0;cursor:pointer" data-edit>
+          <div class="name">${esc(c.name)}</div>
+          <div class="kw">${c.day === 'daily' ? 'Daily' : DAY_LABELS[c.day]} · ${hourLabel(c.hour)}${c.lastRun ? ' · last ran ' + esc(c.lastRun) : ''}${c.lastError ? ` · <span style="color:var(--danger)">failed: ${esc(c.lastError.slice(0, 60))}</span>` : ''}</div>
+        </div>
+        <button class="btn danger" data-del>✕</button>
+      </div>`).join('') : '<p class="sub">No circulations yet.</p>'}
+    </div>
+    <div class="footrow"><button class="btn primary" id="circAdd">+ Add circulation</button></div>`);
+  $$('#circRows .tagrow', box).forEach((row) => {
+    const c = S.circulations.find((x) => x.id === row.dataset.id);
+    $('[data-toggle]', row).onclick = async () => {
+      c.enabled = !c.enabled;
+      await api('PATCH', 'circulations/' + c.id, { enabled: c.enabled });
+      openCirculationsModal();
+    };
+    $('[data-edit]', row).onclick = () => openCirculationEditModal(c);
+    $('[data-del]', row).onclick = async () => {
+      if (!confirm(`Delete "${c.name}"?`)) return;
+      S.circulations = S.circulations.filter((x) => x.id !== c.id);
+      await api('DELETE', 'circulations/' + c.id);
+      openCirculationsModal();
+    };
+  });
+  $('#circAdd', box).onclick = () => openCirculationEditModal(null);
+}
+
+function openCirculationEditModal(c) {
+  const isNew = !c;
+  const box = openModal(`
+    <h2>${isNew ? 'New circulation' : 'Edit circulation'}</h2>
+    <div class="field"><label>Name</label>
+      <input type="text" id="circName" maxlength="60" value="${c ? esc(c.name) : ''}" placeholder="Morning briefing" /></div>
+    <div class="field"><label>Prompt</label>
+      <textarea id="circPrompt" rows="5" placeholder="What should the AI do on this schedule?">${c ? esc(c.prompt) : ''}</textarea>
+      <div class="hint">Tip: end with "Do not make any changes" for read-only runs — otherwise it may edit your data and report the changes.</div></div>
+    <div style="display:flex;gap:10px">
+      <div class="field" style="flex:1"><label>Cadence</label>
+        <select id="circDay">
+          <option value="daily" ${!c || c.day === 'daily' ? 'selected' : ''}>Daily</option>
+          ${DAY_LABELS.map((d, i) => `<option value="${i}" ${c && c.day === i ? 'selected' : ''}>${d}s</option>`).join('')}
+        </select></div>
+      <div class="field" style="flex:1"><label>Hour</label>
+        <select id="circHour">${[...Array(24).keys()].map((h) => `<option value="${h}" ${(c ? c.hour : 8) === h ? 'selected' : ''}>${hourLabel(h)}</option>`).join('')}</select></div>
+    </div>
+    <div class="err" id="circErr"></div>
+    <div class="footrow"><button class="btn primary" id="circSave">Save</button></div>`);
+  $('#circSave', box).onclick = async () => {
+    const payload = {
+      name: $('#circName', box).value.trim(),
+      prompt: $('#circPrompt', box).value.trim(),
+      day: $('#circDay', box).value === 'daily' ? 'daily' : +$('#circDay', box).value,
+      hour: +$('#circHour', box).value,
+    };
+    if (!payload.name || !payload.prompt) return showErr(box, 'Name and prompt are required.');
+    try {
+      if (isNew) {
+        const created = await api('POST', 'circulations', payload);
+        (S.circulations ||= []).push(created);
+      } else {
+        const updated = await api('PATCH', 'circulations/' + c.id, payload);
+        Object.assign(c, updated);
+      }
+      openCirculationsModal();
+      toast('Circulation saved');
+    } catch (err) { showErr(box, err.message); }
+  };
 }
 
 // ---------------------------------------------------------------- board view
@@ -1187,10 +1350,10 @@ function wireWeekInteractions(root, inboxRoot) {
     });
     $('.wdel', card)?.addEventListener('click', async (e) => {
       e.stopPropagation();
-      if (!confirm('Delete this task?')) return;
-      S.messages = S.messages.filter((x) => x.id !== card.dataset.id);
+      const m = S.messages.find((x) => x.id === card.dataset.id);
+      if (m) m.deletedAt = new Date().toISOString();
       renderWeek();
-      api('DELETE', 'messages/' + card.dataset.id).catch(() => toast('Failed to save'));
+      api('DELETE', 'messages/' + card.dataset.id).then(() => toast('Moved to trash')).catch(() => toast('Failed to save'));
     });
     card.addEventListener('click', (e) => {
       if (e.target.closest('.wdel') || e.target.closest('.more') || e.target.closest('a') || e.target.closest('.todo-item')) return;
@@ -1532,7 +1695,7 @@ function stepLightbox(d) {
 
 function setView(v) {
   UI.view = v;
-  for (const name of ['feed', 'board', 'week', 'calendar', 'ask']) {
+  for (const name of ['feed', 'week', 'calendar', 'ask']) {
     $('#view-' + name).hidden = name !== v;
   }
   $$('#viewSwitch button').forEach((b) => b.classList.toggle('active', b.dataset.view === v));
@@ -1541,7 +1704,6 @@ function setView(v) {
 
 function renderCurrentView() {
   if (UI.view === 'feed') renderFeed();
-  else if (UI.view === 'board') renderBoard();
   else if (UI.view === 'week') renderWeek();
   else if (UI.view === 'calendar') renderCalendar();
   else if (UI.view === 'ask') renderAsk();

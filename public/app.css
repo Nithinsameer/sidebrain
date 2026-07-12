@@ -266,6 +266,8 @@ body.compact .card .text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-
 body.compact .card .meta { margin-top: 5px; }
 body.compact .imggrid img, body.compact .imggrid .filecard { height: 64px; }
 
+.archbar { text-align: center; padding: 18px 0 8px; }
+
 .empty {
   text-align: center; color: var(--text-faint); padding: 60px 20px;
   border: 1px dashed var(--border); border-radius: 16px;
