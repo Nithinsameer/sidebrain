@@ -160,6 +160,7 @@ function visibleMessages() {
       const text = m.text.toLowerCase();
       if (text.includes(q)) return true;
       if (q.length >= 3 && fuzzyMatch(text, q)) return true;
+      if (UI.semantic && UI.semantic.has(m.id)) return true; // embedding matches
       const d = new Date(m.createdAt);
       const dateStrs = [
         fmtTime(m.createdAt).toLowerCase(),
@@ -259,6 +260,8 @@ function cardHtml(m, { compactActions = false, draggable = false } = {}) {
     <div class="meta">
       ${tags.map(tagPill).join('')}
       ${m.plannedFor ? `<span class="duechip">Due ${fmtDay(m.plannedFor)}${m.dueTime ? ' · ' + fmtClock(m.dueTime) : ''}</span>` : ''}
+      ${m.parentId || S.messages.some((x) => x.parentId === m.id && !x.deletedAt) ? `<button class="duechip linchip" data-lineage title="View lineage">🔗</button>` : ''}
+      ${(m.similarTo || []).filter((sid) => S.messages.some((x) => x.id === sid && !x.deletedAt)).length ? `<button class="duechip dejachip" data-dejavu title="You've had this thought before">🌀 ×${m.similarTo.length}</button>` : ''}
       <span class="time">${fmtTime(m.createdAt)}</span>
     </div>
   </article>`;
@@ -370,6 +373,29 @@ document.addEventListener('click', async (e) => {
     m.checked = [...set];
     renderCurrentView();
     api('PATCH', 'messages/' + m.id, { checked: m.checked }).catch(() => toast('Failed to save'));
+    return;
+  }
+  // lineage + déjà vu chips
+  const lin = e.target.closest('[data-lineage]');
+  if (lin && card) {
+    const m = S.messages.find((x) => x.id === card.dataset.id);
+    if (m) openLineageModal(m);
+    return;
+  }
+  const dv = e.target.closest('[data-dejavu]');
+  if (dv && card) {
+    const m = S.messages.find((x) => x.id === card.dataset.id);
+    const sims = (m.similarTo || []).map((sid) => S.messages.find((x) => x.id === sid)).filter(Boolean);
+    if (sims.length) {
+      const box = openModal(`
+        <h2>Déjà vu</h2>
+        <p class="sub">You've circled this thought before:</p>
+        ${sims.map((s) => `<button class="rel-item" data-rel="${s.id}"><span class="rel-txt">${esc(s.text.split('\n')[0].slice(0, 90))}</span><span class="rel-when">${fmtDay(dayKey(s.createdAt))}</span></button>`).join('')}`);
+      $$('.rel-item', box).forEach((b) => b.onclick = () => {
+        const rm = S.messages.find((x) => x.id === b.dataset.rel);
+        if (rm) openCardSheet(rm);
+      });
+    }
     return;
   }
   // lightbox open
@@ -722,18 +748,40 @@ function openCardSheet(m) {
       <button data-s="tag"><span class="ic">🏷️</span>Edit tags</button>
       <button data-s="todo"><span class="ic">☑️</span>${m.list ? 'Turn checklist off' : 'Turn into checklist'}<span class="hint">a checkbox per line</span></button>
       <button data-s="week"><span class="ic">📅</span>${m.task ? 'Remove from week planner' : 'Send to week planner'}<span class="hint">${m.task ? '' : 'lands in Inbox'}</span></button>
+      <button data-s="followup"><span class="ic">🧬</span>New follow-up task<span class="hint">linked lineage</span></button>
+      ${lineageOf(m).length > 1 ? `<button data-s="lineage"><span class="ic">🔗</span>View lineage<span class="hint">${lineageOf(m).length} linked</span></button>` : ''}
       <button data-s="copy"><span class="ic">📋</span>Copy text</button>
       <button data-s="del" class="danger"><span class="ic">🗑️</span>Move to trash<span class="hint">recoverable for 30 days</span></button>
-    </div>`);
+    </div>
+    <div id="sheetRelated"></div>`);
+
+  // related notes via embeddings, loaded async
+  api('GET', 'related/' + m.id).then(({ related }) => {
+    const root = $('#sheetRelated', box);
+    if (!root || !related.length) return;
+    root.innerHTML = `<div class="rel-head">Related notes</div>` + related.map((r) => `
+      <button class="rel-item" data-rel="${r.id}">
+        <span class="rel-txt">${esc(r.preview)}</span>
+        <span class="rel-when">${fmtDay(dayKey(r.createdAt))}</span>
+      </button>`).join('');
+    $$('.rel-item', root).forEach((b) => b.onclick = () => {
+      const rm = S.messages.find((x) => x.id === b.dataset.rel);
+      if (rm) openCardSheet(rm);
+    });
+  }).catch(() => {});
 
   $$('.sheet-rows [data-s]', box).forEach((b) => b.onclick = async () => {
     const act = b.dataset.s;
     closeModal();
     if (act === 'edit') return openEditModal(m);
     if (act === 'tag') return openTagAssignModal(m);
+    if (act === 'followup') return openFollowUpModal(m);
+    if (act === 'lineage') return openLineageModal(m);
     await handleCardAction(act, m.id);
   });
 
+  // save silently on change — rebuilding the sheet here would close the
+  // native date/time picker on every tap
   const saveDue = async () => {
     const date = $('#sheetDue', box).value || null;
     const time = $('#sheetDueTime', box).value || null;
@@ -741,14 +789,13 @@ function openCardSheet(m) {
     m.plannedFor = date || (time ? dayKey(new Date().toISOString()) : null);
     m.dueTime = time;
     if (m.plannedFor) m.task = true;
-    renderCurrentView();
+    renderCurrentView(); // feed behind the sheet updates; the sheet stays put
     try {
       await api('PATCH', 'messages/' + m.id, { plannedFor: m.plannedFor, dueTime: m.dueTime, task: m.task });
       toast(m.plannedFor
         ? 'Due ' + fmtDay(m.plannedFor) + (m.dueTime ? ' · ' + fmtClock(m.dueTime) : '')
         : 'Due date cleared');
     } catch { toast('Failed to save'); }
-    openCardSheet(m);
   };
   $('#sheetDue', box).onchange = saveDue;
   $('#sheetDueTime', box).onchange = saveDue;
@@ -756,10 +803,86 @@ function openCardSheet(m) {
   if (clr) clr.onclick = async () => {
     m.plannedFor = null;
     m.dueTime = null;
+    $('#sheetDue', box).value = '';
+    $('#sheetDueTime', box).value = '';
     renderCurrentView();
     try { await api('PATCH', 'messages/' + m.id, { plannedFor: null, dueTime: null }); toast('Due date cleared'); } catch {}
-    openCardSheet(m);
   };
+}
+
+// ---- lineage (follow-up task chains)
+
+// walk to the root, then collect the whole chain depth-first
+function lineageOf(m) {
+  let root = m;
+  const seen = new Set();
+  while (root.parentId && !seen.has(root.parentId)) {
+    seen.add(root.parentId);
+    const p = S.messages.find((x) => x.id === root.parentId && !x.deletedAt);
+    if (!p) break;
+    root = p;
+  }
+  const chain = [];
+  const walk = (node, depth) => {
+    chain.push({ m: node, depth });
+    S.messages
+      .filter((x) => x.parentId === node.id && !x.deletedAt)
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
+      .forEach((child) => walk(child, depth + 1));
+  };
+  walk(root, 0);
+  return chain;
+}
+
+function openFollowUpModal(parent) {
+  const box = openModal(`
+    <h2>Follow-up task</h2>
+    <p class="sub">Linked to: "${esc(parent.text.split('\n')[0].slice(0, 60))}"</p>
+    <div class="field"><label>What's next?</label>
+      <textarea id="fuText" rows="3" placeholder="The next step..."></textarea></div>
+    <div style="display:flex;gap:10px">
+      <div class="field" style="flex:1"><label>Due date</label><input type="date" id="fuDate" /></div>
+      <div class="field" style="flex:1"><label>Time</label><input type="time" id="fuTime" /></div>
+    </div>
+    <div class="err" id="fuErr"></div>
+    <div class="footrow"><button class="btn primary" id="fuSave">Create task</button></div>`);
+  $('#fuText', box).focus();
+  $('#fuSave', box).onclick = async () => {
+    const text = $('#fuText', box).value.trim();
+    if (!text) return showErr(box, 'Describe the follow-up.');
+    try {
+      const msg = await api('POST', 'messages', {
+        text,
+        task: true,
+        parentId: parent.id,
+        plannedFor: $('#fuDate', box).value || null,
+        dueTime: $('#fuTime', box).value || null,
+        tagIds: parent.tagIds,
+      });
+      S.messages.unshift(msg);
+      closeModal();
+      renderAll();
+      toast('Follow-up created' + (msg.plannedFor ? ' — due ' + fmtDay(msg.plannedFor) : ' — in week Inbox'));
+    } catch (err) { showErr(box, err.message); }
+  };
+}
+
+function openLineageModal(m) {
+  const chain = lineageOf(m);
+  const box = openModal(`
+    <h2>Lineage</h2>
+    <p class="sub">The chain this ${m.task ? 'task' : 'note'} belongs to, oldest first.</p>
+    <div>${chain.map(({ m: n, depth }) => `
+      <button class="lin-item ${n.id === m.id ? 'current' : ''}" data-id="${n.id}" style="padding-left:${14 + depth * 22}px">
+        <span class="lin-mark">${depth ? '↳' : '●'}</span>
+        <span class="lin-txt ${n.task && n.done ? 'done' : ''}">${esc(n.text.split('\n')[0].slice(0, 70))}</span>
+        <span class="lin-when">${n.task ? (n.done ? '✓ done' : (n.plannedFor ? 'due ' + fmtDay(n.plannedFor) : 'open')) : fmtDay(dayKey(n.createdAt))}</span>
+      </button>`).join('')}
+    </div>`);
+  $$('.lin-item', box).forEach((b) => b.onclick = () => {
+    const n = S.messages.find((x) => x.id === b.dataset.id);
+    if (n) openCardSheet(n);
+  });
 }
 
 // ---- edit note text
@@ -1125,7 +1248,7 @@ function openCirculationsModal() {
         <button class="switch ${c.enabled ? 'on' : ''}" data-toggle title="Enable/disable"></button>
         <div style="flex:1;min-width:0;cursor:pointer" data-edit>
           <div class="name">${esc(c.name)}</div>
-          <div class="kw">${c.day === 'daily' ? 'Daily' : DAY_LABELS[c.day]} · ${hourLabel(c.hour)}${c.lastRun ? ' · last ran ' + esc(c.lastRun) : ''}${c.lastError ? ` · <span style="color:var(--danger)">failed: ${esc(c.lastError.slice(0, 60))}</span>` : ''}</div>
+          <div class="kw">${c.day === 'daily' ? 'Daily' : c.day === 'monthly' ? 'Monthly (1st)' : DAY_LABELS[c.day]} · ${hourLabel(c.hour)}${c.lastRun ? ' · last ran ' + esc(c.lastRun) : ''}${c.lastError ? ` · <span style="color:var(--danger)">failed: ${esc(c.lastError.slice(0, 60))}</span>` : ''}</div>
         </div>
         <button class="btn danger" data-del>✕</button>
       </div>`).join('') : '<p class="sub">No circulations yet.</p>'}
@@ -1163,6 +1286,7 @@ function openCirculationEditModal(c) {
         <select id="circDay">
           <option value="daily" ${!c || c.day === 'daily' ? 'selected' : ''}>Daily</option>
           ${DAY_LABELS.map((d, i) => `<option value="${i}" ${c && c.day === i ? 'selected' : ''}>${d}s</option>`).join('')}
+          <option value="monthly" ${c && c.day === 'monthly' ? 'selected' : ''}>Monthly (1st)</option>
         </select></div>
       <div class="field" style="flex:1"><label>Hour</label>
         <select id="circHour">${[...Array(24).keys()].map((h) => `<option value="${h}" ${(c ? c.hour : 8) === h ? 'selected' : ''}>${hourLabel(h)}</option>`).join('')}</select></div>
@@ -1170,10 +1294,11 @@ function openCirculationEditModal(c) {
     <div class="err" id="circErr"></div>
     <div class="footrow"><button class="btn primary" id="circSave">Save</button></div>`);
   $('#circSave', box).onclick = async () => {
+    const dayVal = $('#circDay', box).value;
     const payload = {
       name: $('#circName', box).value.trim(),
       prompt: $('#circPrompt', box).value.trim(),
-      day: $('#circDay', box).value === 'daily' ? 'daily' : +$('#circDay', box).value,
+      day: dayVal === 'daily' || dayVal === 'monthly' ? dayVal : +dayVal,
       hour: +$('#circHour', box).value,
     };
     if (!payload.name || !payload.prompt) return showErr(box, 'Name and prompt are required.');
@@ -1558,6 +1683,118 @@ function renderFolder() {
   });
 }
 
+// ---------------------------------------------------------------- habits
+
+const WORKOUTS = ['push', 'pull', 'legs', 'upper', 'lower', 'other'];
+const WORKOUT_COLORS = { push: '#3cf58c', pull: '#0ea5e9', legs: '#f59e0b', upper: '#d946ef', lower: '#14b8a6', other: '#94a3b8' };
+UI.habitRange = 30;
+
+function habitDays(n) {
+  return [...Array(n)].map((_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (n - 1 - i));
+    return dayKey(d.toISOString());
+  });
+}
+
+function renderHabits() {
+  const today = dayKey(new Date().toISOString());
+  const h = (S.habits || {})[today] || {};
+
+  $('#habitToday').innerHTML = `
+    <div class="habit-card">
+      <div class="hc-title">// today — ${fmtDay(today)}</div>
+      <div class="hc-row">
+        <span class="hc-label">Gym</span>
+        <button class="switch ${h.gym ? 'on' : ''}" id="hGym"></button>
+        <div class="segmented hc-workouts ${h.gym ? '' : 'dim'}">
+          ${WORKOUTS.map((w) => `<button data-w="${w}" class="${h.workout === w ? 'on' : ''}">${w}</button>`).join('')}
+        </div>
+      </div>
+      <div class="hc-row hc-nums">
+        <label>Steps <input type="number" id="hSteps" inputmode="numeric" placeholder="0" value="${h.steps ?? ''}" /></label>
+        <label>Calories <input type="number" id="hCal" inputmode="numeric" placeholder="0" value="${h.calories ?? ''}" /></label>
+        <label>Weight <input type="number" id="hWeight" step="0.1" inputmode="decimal" placeholder="—" value="${h.weight ?? ''}" /></label>
+        <button class="btn primary" id="hSave">Log</button>
+      </div>
+    </div>`;
+
+  const patch = async (fields) => {
+    Object.assign(((S.habits ||= {})[today] ||= {}), fields);
+    renderHabitCharts();
+    try { await api('PATCH', 'habits/' + today, fields); } catch { toast('Failed to save'); }
+  };
+  $('#hGym').onclick = function () {
+    this.classList.toggle('on');
+    $('.hc-workouts').classList.toggle('dim', !this.classList.contains('on'));
+    patch({ gym: this.classList.contains('on') });
+  };
+  $$('.hc-workouts [data-w]').forEach((b) => b.onclick = () => {
+    $$('.hc-workouts [data-w]').forEach((x) => x.classList.toggle('on', x === b));
+    if (!$('#hGym').classList.contains('on')) { $('#hGym').classList.add('on'); $('.hc-workouts').classList.remove('dim'); }
+    patch({ gym: true, workout: b.dataset.w });
+  });
+  $('#hSave').onclick = () => {
+    patch({ steps: $('#hSteps').value, calories: $('#hCal').value, weight: $('#hWeight').value });
+    toast('Logged ✓');
+  };
+
+  renderHabitCharts();
+}
+
+function renderHabitCharts() {
+  const days = habitDays(UI.habitRange);
+  const H = S.habits || {};
+  const val = (d, k) => (H[d] || {})[k];
+
+  // weight trend — the paper dot chart, digitized
+  const wPts = days.map((d, i) => ({ i, d, v: val(d, 'weight') })).filter((p) => p.v != null);
+  let weightSvg = '<div class="hc-empty">No weight check-ins yet — log one above.</div>';
+  if (wPts.length) {
+    const vals = wPts.map((p) => p.v);
+    const lo = Math.min(...vals) - 1, hi = Math.max(...vals) + 1;
+    const W = 640, Hh = 160, px = (i) => 30 + (i / Math.max(days.length - 1, 1)) * (W - 45), py = (v) => 12 + (1 - (v - lo) / (hi - lo || 1)) * (Hh - 34);
+    weightSvg = `<svg viewBox="0 0 ${W} ${Hh}" class="hchart">
+      <text x="2" y="${py(hi - 1) + 4}" class="ax">${(hi - 1).toFixed(1)}</text>
+      <text x="2" y="${py(lo + 1) + 4}" class="ax">${(lo + 1).toFixed(1)}</text>
+      <polyline fill="none" stroke="var(--accent)" stroke-width="1.5" opacity=".55" points="${wPts.map((p) => px(p.i) + ',' + py(p.v)).join(' ')}" />
+      ${wPts.map((p) => `<circle cx="${px(p.i)}" cy="${py(p.v)}" r="3.2" fill="var(--accent)"><title>${p.d}: ${p.v}</title></circle>`).join('')}
+      <text x="${px(wPts[wPts.length - 1].i)}" y="${py(wPts[wPts.length - 1].v) - 8}" class="ax" text-anchor="middle">${wPts[wPts.length - 1].v}</text>
+    </svg>`;
+  }
+
+  const bars = (key, color) => {
+    const pts = days.map((d, i) => ({ i, d, v: val(d, key) || 0 }));
+    const max = Math.max(...pts.map((p) => p.v), 1);
+    const W = 640, Hh = 120, bw = Math.max(2, (W - 40) / days.length - 2);
+    if (!pts.some((p) => p.v > 0)) return '<div class="hc-empty">Nothing logged yet.</div>';
+    return `<svg viewBox="0 0 ${W} ${Hh}" class="hchart">
+      <text x="2" y="14" class="ax">${max >= 1000 ? (max / 1000).toFixed(1) + 'k' : max}</text>
+      ${pts.map((p) => p.v ? `<rect x="${30 + (p.i / days.length) * (W - 40)}" y="${8 + (1 - p.v / max) * (Hh - 28)}" width="${bw}" height="${(p.v / max) * (Hh - 28)}" rx="1.5" fill="${color}" opacity=".85"><title>${p.d}: ${p.v}</title></rect>` : '').join('')}
+    </svg>`;
+  };
+
+  // gym consistency grid — last 12 weeks, GitHub-style
+  const gridDays = habitDays(12 * 7);
+  const cells = gridDays.map((d, i) => {
+    const g = H[d] || {};
+    const col = Math.floor(i / 7), row = i % 7;
+    const c = g.gym ? (WORKOUT_COLORS[g.workout] || 'var(--accent)') : 'color-mix(in srgb, var(--text) 10%, transparent)';
+    return `<rect x="${col * 13}" y="${row * 13}" width="10" height="10" rx="2.5" fill="${c}"><title>${d}${g.gym ? ' — ' + (g.workout || 'gym') : ''}</title></rect>`;
+  }).join('');
+  const gymCount = gridDays.filter((d) => (H[d] || {}).gym).length;
+
+  $('#habitCharts').innerHTML = `
+    <div class="habit-card"><div class="hc-title">// weight</div>${weightSvg}</div>
+    <div class="habit-card"><div class="hc-title">// steps</div>${bars('steps', '#0ea5e9')}</div>
+    <div class="habit-card"><div class="hc-title">// calories burnt</div>${bars('calories', '#f59e0b')}</div>
+    <div class="habit-card">
+      <div class="hc-title">// gym — ${gymCount} sessions in 12 weeks</div>
+      <svg viewBox="0 0 ${12 * 13} ${7 * 13 - 3}" class="hgrid">${cells}</svg>
+      <div class="hc-legend">${WORKOUTS.map((w) => `<span><i style="background:${WORKOUT_COLORS[w]}"></i>${w}</span>`).join('')}</div>
+    </div>`;
+}
+
 // ---------------------------------------------------------------- ask (AI chat)
 
 const CHAT_SUGGESTIONS = [
@@ -1742,7 +1979,7 @@ function stepLightbox(d) {
 
 function setView(v) {
   UI.view = v;
-  for (const name of ['feed', 'week', 'calendar', 'ask']) {
+  for (const name of ['feed', 'week', 'calendar', 'habits', 'ask']) {
     $('#view-' + name).hidden = name !== v;
   }
   $$('#viewSwitch button').forEach((b) => b.classList.toggle('active', b.dataset.view === v));
@@ -1753,6 +1990,7 @@ function renderCurrentView() {
   if (UI.view === 'feed') renderFeed();
   else if (UI.view === 'week') renderWeek();
   else if (UI.view === 'calendar') renderCalendar();
+  else if (UI.view === 'habits') renderHabits();
   else if (UI.view === 'ask') renderAsk();
 }
 
@@ -1787,10 +2025,25 @@ async function boot() {
 
   // search
   const search = $('#search');
+  let semTimer = null;
   search.addEventListener('input', () => {
     UI.search = search.value;
     $('#searchClear').style.display = search.value ? 'block' : 'none';
     renderCurrentView();
+    // semantic layer: debounce an embeddings lookup and merge the hits in
+    clearTimeout(semTimer);
+    UI.semantic = null;
+    const q = search.value.trim();
+    if (q.length >= 3) {
+      semTimer = setTimeout(async () => {
+        try {
+          const { results } = await api('POST', 'semantic-search', { q });
+          if (UI.search.trim() !== q) return; // stale response
+          UI.semantic = new Map(results.map((r) => [r.id, r.score]));
+          if (results.length) renderCurrentView();
+        } catch {}
+      }, 350);
+    }
   });
   $('#searchClear').addEventListener('click', () => { search.value = ''; UI.search = ''; $('#searchClear').style.display = 'none'; renderCurrentView(); });
 
@@ -1836,6 +2089,13 @@ async function boot() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') doRefresh(true);
   });
+
+  // habits range toggle
+  $$('#view-habits [data-range]').forEach((b) => b.addEventListener('click', () => {
+    UI.habitRange = +b.dataset.range;
+    $$('#view-habits [data-range]').forEach((x) => x.classList.toggle('on', x === b));
+    renderHabitCharts();
+  }));
 
   // ask chat
   const chatInput = $('#chatInput');

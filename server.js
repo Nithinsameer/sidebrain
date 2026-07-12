@@ -45,6 +45,7 @@ const DEFAULT_DB = {
   automations: [],// {id, name, prompt, createdAt} — replayable Ask prompts
   circulations: [],// {id, name, prompt, hour, day('daily'|0-6), enabled, lastRun, lastError}
   tags: [],       // {id, name, color, keywords[], parent, createdAt}
+  habits: {},     // {'YYYY-MM-DD': {gym, workout, steps, calories, weight}}
   messages: [],   // {id, text, createdAt, pinned, tagIds[], files[], list, checked[], canvas:{on,x,y}}
   reminders: [],  // {id, text, due, done, createdAt}
 };
@@ -214,6 +215,7 @@ function createMessage(body) {
     plannedFor: DAY_RE.test(body.plannedFor || '') ? body.plannedFor : null,
     dueTime: TIME_RE.test(body.dueTime || '') ? body.dueTime : null,
     taskNotified: false,
+    parentId: body.parentId && db.messages.some((m) => m.id === body.parentId) ? body.parentId : null,
     canvas: { on: false, x: 40, y: 40 },
   };
   db.messages.unshift(msg);
@@ -384,7 +386,7 @@ function runCirculations(now) {
   for (const c of db.circulations) {
     if (!c.enabled || c.lastRun === today) continue;
     if (now.getHours() !== c.hour) continue;
-    if (c.day !== 'daily' && Number(c.day) !== now.getDay()) continue;
+    if (c.day === 'monthly' ? now.getDate() !== 1 : (c.day !== 'daily' && Number(c.day) !== now.getDay())) continue;
     c.lastRun = today;
     saveDb();
     runAgentTurn([{ role: 'user', content: c.prompt }])
@@ -485,7 +487,16 @@ const CHAT_TOOLS = [
     plannedFor: { type: ['string', 'null'], description: 'YYYY-MM-DD' },
     dueTime: { type: ['string', 'null'], description: 'HH:MM 24h' },
     tagNames: { type: 'array', items: { type: 'string' } },
+    parentId: { type: ['string', 'null'], description: 'id of the note/task this follows from (creates a tracked lineage)' },
   }, required: ['text'] } } },
+  { type: 'function', function: { name: 'log_habit', description: "Log or update the user's daily habit record (gym, workout type, steps, calories burnt, weight). Only pass fields mentioned.", parameters: { type: 'object', properties: {
+    date: { type: 'string', description: 'YYYY-MM-DD, default today' },
+    gym: { type: 'boolean' },
+    workout: { type: 'string', description: 'push | pull | legs | upper | lower | other' },
+    steps: { type: 'number' },
+    calories: { type: 'number' },
+    weight: { type: 'number' },
+  } } } },
   { type: 'function', function: { name: 'delete_note', description: 'Permanently delete a note. Only when the user clearly asked for deletion.', parameters: { type: 'object', properties: {
     id: { type: 'string' },
   }, required: ['id'] } } },
@@ -497,8 +508,18 @@ const CHAT_TOOLS = [
 
 function applyChatTool(name, args) {
   const brief = (t) => String(t || '').split('\n')[0].slice(0, 60);
+  if (name === 'log_habit') {
+    const day = DAY_RE.test(args.date || '') ? args.date : localDay();
+    const h = (db.habits[day] ||= {});
+    if ('gym' in args) h.gym = !!args.gym;
+    if ('workout' in args) h.workout = String(args.workout || '').toLowerCase().slice(0, 20) || null;
+    for (const k of ['steps', 'calories', 'weight']) if (k in args && !isNaN(+args[k])) h[k] = +args[k];
+    saveDb();
+    return { ok: true, summary: `logged habits for ${day}` };
+  }
   if (name === 'create_note') {
-    const msg = createMessage({ text: args.text, task: !!args.task, plannedFor: args.plannedFor || undefined, dueTime: args.dueTime || undefined });
+    const parent = args.parentId ? db.messages.find((m) => m.id === args.parentId || m.id.startsWith(args.parentId)) : null;
+    const msg = createMessage({ text: args.text, task: !!args.task, plannedFor: args.plannedFor || undefined, dueTime: args.dueTime || undefined, parentId: parent ? parent.id : undefined });
     if (!msg) return { ok: false, error: 'empty text' };
     if (Array.isArray(args.tagNames) && args.tagNames.length) {
       msg.tagIds = [...new Set(args.tagNames.map((n) => tagByNameOrCreate(n)).filter(Boolean).map((t) => t.id))];
@@ -536,6 +557,78 @@ function applyChatTool(name, args) {
   }
   return { ok: false, error: 'unknown tool' };
 }
+
+// ---------------------------------------------------------------- embeddings (semantic memory)
+
+const EMB_PATH = path.join(DATA_DIR, 'embeddings.json');
+let EMB = {};
+try { EMB = JSON.parse(fs.readFileSync(EMB_PATH, 'utf8')); } catch { EMB = {}; }
+let embSaveTimer = null;
+function saveEmb() {
+  clearTimeout(embSaveTimer);
+  embSaveTimer = setTimeout(() => {
+    try { fs.writeFileSync(EMB_PATH, JSON.stringify(EMB)); } catch {}
+  }, 300);
+}
+function invalidateEmbedding(id) { delete EMB[id]; saveEmb(); }
+
+async function embedTexts(texts) {
+  const { key, base } = aiConfig();
+  if (!key) return null;
+  const r = await fetch(base + '/embeddings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
+    body: JSON.stringify({ model: 'text-embedding-3-small', dimensions: 256, input: texts.map((t) => t.slice(0, 2000)) }),
+  });
+  if (!r.ok) return null;
+  const j = await r.json();
+  return (j.data || []).map((d) => d.embedding);
+}
+
+function cosine(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb) || 1);
+}
+
+function similarTo(vec, excludeId, limit = 5, floor = 0.35) {
+  const out = [];
+  for (const m of db.messages) {
+    if (m.id === excludeId || m.deletedAt || !EMB[m.id]) continue;
+    const s = cosine(vec, EMB[m.id]);
+    if (s >= floor) out.push({ id: m.id, score: s });
+  }
+  return out.sort((a, b) => b.score - a.score).slice(0, limit);
+}
+
+// backfill loop: embed new/edited notes in batches; flag déjà vu on fresh ones
+let embedding = false;
+async function backfillEmbeddings() {
+  if (embedding || !aiConfig().key) return;
+  const todo = db.messages.filter((m) => !m.deletedAt && m.text && !EMB[m.id]).slice(0, 40);
+  if (!todo.length) return;
+  embedding = true;
+  try {
+    const vecs = await embedTexts(todo.map((m) => m.text));
+    if (vecs) {
+      todo.forEach((m, i) => {
+        if (!vecs[i]) return;
+        EMB[m.id] = vecs[i];
+        // déjà vu: notes younger than a day get flagged if old thoughts match closely
+        if (Date.now() - Date.parse(m.createdAt) < 86400000 && m.similarTo === undefined) {
+          const sims = similarTo(vecs[i], m.id, 3, 0.6)
+            .filter((s) => { const o = db.messages.find((x) => x.id === s.id); return o && o.createdAt < m.createdAt; });
+          m.similarTo = sims.map((s) => s.id);
+        }
+      });
+      saveEmb();
+      saveDb();
+    }
+  } catch { /* transient */ }
+  finally { embedding = false; }
+}
+setInterval(backfillEmbeddings, 45000);
+setTimeout(backfillEmbeddings, 4000); // one pass shortly after boot
 
 // Auto-classify a freshly captured note that arrived with no tags: pick tags,
 // decide if it's a task, and pull out any due date/time implied by the text.
@@ -604,7 +697,12 @@ ${lines.join('\n') || '(none yet)'}
 OPEN REMINDERS:
 ${rems.join('\n') || '(none)'}
 
-TAGS: ${db.tags.map((t) => t.name).join(', ') || '(none)'}`;
+TAGS: ${db.tags.map((t) => t.name).join(', ') || '(none)'}
+
+HABITS (last 14 days — day | gym/workout | steps | calories | weight):
+${Object.entries(db.habits).sort((a, b) => b[0].localeCompare(a[0])).slice(0, 14)
+  .map(([d, h]) => `${d} | ${h.gym ? 'gym:' + (h.workout || 'yes') : 'no gym'} | ${h.steps ?? '-'} | ${h.calories ?? '-'} | ${h.weight ?? '-'}`)
+  .join('\n') || '(none logged yet)'}`;
 }
 
 // One streamed chat-completions call: returns the assembled assistant message,
@@ -769,7 +867,10 @@ async function handleApi(req, res, pathname) {
       if ('text' in body) {
         msg.text = String(body.text);
         msg.tagIds = [...new Set([...(body.tagIds || msg.tagIds), ...autoTagIds(msg.text)])];
+        invalidateEmbedding(msg.id); // re-embed edited text
+        delete msg.similarTo;
       }
+      if ('parentId' in body) msg.parentId = body.parentId && db.messages.some((m) => m.id === body.parentId) ? body.parentId : null;
       if ('tagIds' in body) msg.tagIds = [...new Set(body.tagIds)];
       for (const k of ['pinned', 'list', 'checked', 'canvas', 'task', 'done']) if (k in body) msg[k] = body[k];
       if (body.restore) msg.deletedAt = null;
@@ -787,6 +888,7 @@ async function handleApi(req, res, pathname) {
         msg.deletedAt = new Date().toISOString(); // soft delete → trash (30 days)
       } else {
         db.messages = db.messages.filter((m) => m.id !== id); // second delete = forever
+        invalidateEmbedding(id);
       }
       saveDb();
       return send(res, 200, { ok: true });
@@ -877,6 +979,49 @@ async function handleApi(req, res, pathname) {
     return res.end(csv);
   }
 
+  // ---- semantic search + related notes (embeddings)
+  if (resource === 'semantic-search' && method === 'POST') {
+    const body = await readBody(req);
+    const q = String(body.q || '').trim();
+    if (!q || !aiConfig().key) return send(res, 200, { results: [] });
+    const [vec] = (await embedTexts([q])) || [];
+    if (!vec) return send(res, 200, { results: [] });
+    return send(res, 200, { results: similarTo(vec, null, 15, 0.28) });
+  }
+  if (resource === 'related' && method === 'GET' && id) {
+    let vec = EMB[id];
+    if (!vec) {
+      const m = db.messages.find((x) => x.id === id);
+      if (m && m.text && aiConfig().key) {
+        [vec] = (await embedTexts([m.text])) || [];
+        if (vec) { EMB[id] = vec; saveEmb(); }
+      }
+    }
+    if (!vec) return send(res, 200, { related: [] });
+    const rel = similarTo(vec, id, 4, 0.35).map((s) => {
+      const m = db.messages.find((x) => x.id === s.id);
+      return { id: s.id, score: Math.round(s.score * 100) / 100, preview: m.text.split('\n')[0].slice(0, 90), createdAt: m.createdAt };
+    });
+    return send(res, 200, { related: rel });
+  }
+
+  // ---- habits: one merged record per day
+  if (resource === 'habits' && method === 'PATCH' && id) {
+    if (!DAY_RE.test(id)) return send(res, 400, { error: 'bad day' });
+    const body = await readBody(req);
+    const h = (db.habits[id] ||= {});
+    if ('gym' in body) h.gym = !!body.gym;
+    if ('workout' in body) h.workout = String(body.workout || '').slice(0, 20) || null;
+    for (const k of ['steps', 'calories', 'weight']) {
+      if (k in body) {
+        const v = parseFloat(body[k]);
+        h[k] = isNaN(v) ? null : v;
+      }
+    }
+    saveDb();
+    return send(res, 200, { day: id, ...h });
+  }
+
   // ---- automations: saved Ask prompts, replayable with one tap
   if (resource === 'automations') {
     if (method === 'POST') {
@@ -930,7 +1075,7 @@ async function handleApi(req, res, pathname) {
         name: String(body.name || '').trim().slice(0, 60) || 'Untitled',
         prompt: String(body.prompt || '').trim().slice(0, 3000),
         hour: Math.max(0, Math.min(23, +body.hour || 8)),
-        day: body.day === 'daily' ? 'daily' : Math.max(0, Math.min(6, +body.day || 0)),
+        day: body.day === 'daily' || body.day === 'monthly' ? body.day : Math.max(0, Math.min(6, +body.day || 0)),
         enabled: body.enabled !== false,
         lastRun: null,
         lastError: null,
@@ -947,7 +1092,7 @@ async function handleApi(req, res, pathname) {
       if ('name' in body) c.name = String(body.name).trim().slice(0, 60) || c.name;
       if ('prompt' in body) c.prompt = String(body.prompt).trim().slice(0, 3000) || c.prompt;
       if ('hour' in body) c.hour = Math.max(0, Math.min(23, +body.hour || 0));
-      if ('day' in body) c.day = body.day === 'daily' ? 'daily' : Math.max(0, Math.min(6, +body.day || 0));
+      if ('day' in body) c.day = body.day === 'daily' || body.day === 'monthly' ? body.day : Math.max(0, Math.min(6, +body.day || 0));
       if ('enabled' in body) c.enabled = !!body.enabled;
       saveDb();
       return send(res, 200, c);

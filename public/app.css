@@ -394,6 +394,62 @@ body.compact .imggrid img, body.compact .imggrid .filecard { height: 64px; }
 .folder .f-item.on .box { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
 .folder .f-item .t { font-size: 12px; color: var(--text-dim); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 
+/* ---------------------------------------------------------------- habits */
+
+.habit-card {
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 16px;
+  padding: 16px 18px; margin-bottom: 14px;
+}
+.hc-title { font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--text-faint); margin-bottom: 12px; }
+.hc-title::first-letter { color: var(--accent); }
+.hc-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.hc-row:last-child { margin-bottom: 0; }
+.hc-label { font-size: 12px; color: var(--text-dim); }
+.hc-workouts { flex: 1; min-width: 260px; }
+.hc-workouts.dim { opacity: .4; }
+.hc-nums { gap: 10px; }
+.hc-nums label { display: flex; flex-direction: column; gap: 4px; font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase; color: var(--text-faint); flex: 1; min-width: 90px; }
+.hc-nums input {
+  padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 9px;
+  outline: none; width: 100%;
+}
+.hc-nums input:focus { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.hc-nums .btn { align-self: flex-end; }
+.hchart { width: 100%; height: auto; display: block; }
+.hchart .ax { font-size: 9px; fill: var(--text-faint); font-family: inherit; }
+.hgrid { max-width: 340px; display: block; }
+.hc-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; font-size: 10.5px; color: var(--text-faint); }
+.hc-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
+.hc-empty { color: var(--text-faint); font-size: 12.5px; padding: 8px 0; }
+
+/* ---------------------------------------------------------------- related + lineage */
+
+.rel-head { font-size: 10.5px; letter-spacing: 2px; text-transform: uppercase; color: var(--text-faint); margin: 16px 0 8px; }
+.rel-item {
+  display: flex; align-items: baseline; gap: 10px; width: 100%; text-align: left;
+  padding: 9px 11px; border-radius: 10px; border: 1px solid var(--border); margin-bottom: 6px;
+  background: var(--bg); font-size: 12.5px; color: var(--text-dim);
+}
+.rel-item:hover, .rel-item:active { background: var(--bg-hover); color: var(--text); }
+.rel-item .rel-txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rel-item .rel-when { flex: none; font-size: 10.5px; color: var(--text-faint); }
+
+.lin-item {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left;
+  padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); margin-bottom: 6px;
+  background: var(--bg); font-size: 13px;
+}
+.lin-item:hover { background: var(--bg-hover); }
+.lin-item.current { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+.lin-item .lin-mark { color: var(--accent); flex: none; }
+.lin-item .lin-txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lin-item .lin-txt.done { text-decoration: line-through; color: var(--text-faint); }
+.lin-item .lin-when { flex: none; font-size: 10.5px; color: var(--text-faint); }
+
+.linchip, .dejachip { cursor: pointer; }
+.linchip:hover, .dejachip:hover { border-color: var(--accent); color: var(--accent); }
+.dejachip { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+
 /* ---------------------------------------------------------------- ask (AI chat) */
 
 .chat-wrap { display: flex; flex-direction: column; height: calc(100dvh - 230px); min-height: 360px; }

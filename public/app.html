@@ -32,6 +32,7 @@
       <button data-view="feed">Feed</button>
       <button data-view="week">Week</button>
       <button data-view="calendar">Calendar</button>
+      <button data-view="habits">Habits</button>
       <button data-view="ask">Ask</button>
     </nav>
 
@@ -144,6 +145,19 @@
         <div class="f-list" id="folderList"></div>
       </div>
     </div>
+  </main>
+
+  <!-- HABITS -->
+  <main class="main" id="view-habits" hidden>
+    <div class="viewbar">
+      <span class="title">Habits</span>
+      <div class="segmented" style="width:150px">
+        <button data-range="30" class="on">30d</button>
+        <button data-range="90">90d</button>
+      </div>
+    </div>
+    <div id="habitToday"></div>
+    <div id="habitCharts"></div>
   </main>
 
   <!-- ASK (AI chat) -->
