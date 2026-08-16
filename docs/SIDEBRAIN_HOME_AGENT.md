@@ -17,22 +17,17 @@ Sidebrain uses the official Govee Developer API device, state, control, dynamic-
 
 The default key path is `~/.config/sidebrain/govee-api-key`. Both the directory and file must be owned by the Sidebrain user, must not be symlinks, and must have modes `0700` and `0600`. The key is never stored in `db.json`, returned by an API or MCP tool, or included in a log/error message.
 
-Run this from an interactive zsh only when ready to configure the key:
+Run this single line from an interactive zsh only when ready to configure the key. Input is intentionally invisible; press Return after typing the key:
 
 ```zsh
-install -d -m 700 "$HOME/.config/sidebrain"
-umask 077
-printf 'Govee API key: ' >&2
-IFS= read -r -s SIDEBRAIN_GOVEE_KEY
-printf '\n' >&2
-printf '%s\n' "$SIDEBRAIN_GOVEE_KEY" > "$HOME/.config/sidebrain/govee-api-key"
-unset SIDEBRAIN_GOVEE_KEY
-chmod 600 "$HOME/.config/sidebrain/govee-api-key"
+( install -d -m 700 "$HOME/.config/sidebrain" && umask 077 && IFS= read -r -s 'SIDEBRAIN_GOVEE_KEY?Govee API key: ' && printf '\n' >&2 && printf '%s\n' "$SIDEBRAIN_GOVEE_KEY" > "$HOME/.config/sidebrain/govee-api-key" && chmod 600 "$HOME/.config/sidebrain/govee-api-key" && unset SIDEBRAIN_GOVEE_KEY && printf 'Saved securely.\n' )
 ```
 
 After configuration, call `list_lights` first. It returns opaque Sidebrain light IDs, Govee app names, models, online state, current queryable state, and useful discovered capabilities. Call `list_light_scenes` to discover dynamic, DIY, and snapshot options. Those returned IDs/names are the only accepted scene selectors.
 
 Named Sidebrain presets support different settings for each discovered bulb. Suggested names include Focus, Reading, Movie, Wind Down, Night, and All Off; they are intentionally not seeded until the real bulbs and desired per-bulb settings are known.
+
+Read-only production discovery on 2026-08-16 verified three `devices.types.light` devices: **Door**, **Computer table**, and **Bedside**, all model H6008. Each exposes power, brightness 1-100, RGB, color temperature 2000-9000 K, dynamic scenes, and DIY-scene capability. The scene API returned the same 56 named dynamic scenes for each bulb. The DIY endpoint currently returns no selectable DIY options, and none of the three device descriptors exposes snapshots, so Sidebrain reports neither until Govee supplies selectable values. Two virtual entries (`SameModeGroup` and `DreamViewScenic`) were also returned by Govee; they are deliberately excluded because their device type is not a light and their state/scene endpoints reject requests.
 
 ## Delegation schema and lifecycle
 
@@ -90,7 +85,7 @@ For code rollback, restore the previous commit and restart the service. The sche
 
 ## Limitations
 
-- Actual bulb inventory and presets cannot be verified without the API key and read-only discovery approval.
+- Actual bulb inventory and read-only capabilities are verified. Presets remain intentionally unseeded until Sameer chooses the per-bulb settings.
 - Scene parity depends on what each Govee model returns; the service does not invent unsupported options.
 - The voice grammar is intentionally narrow and deterministic. It asks for exact dates instead of interpreting conversational weekday phrases.
 - Sidebrain still assumes the existing trusted LAN/private-Tailscale boundary; the voice endpoint adds bearer authentication but does not change transport security.

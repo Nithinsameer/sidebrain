@@ -48,3 +48,21 @@ test('Govee client uses only official endpoints and keeps the API key out of res
     return true;
   });
 });
+
+test('Govee client reports an API error code returned inside an HTTP 200 response', async () => {
+  const client = createGoveeClient({
+    apiKeyProvider: () => 'fixture-secret',
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 400, message: 'device does not support this endpoint' }),
+    }),
+  });
+
+  await assert.rejects(client.listDevices(), (error) => {
+    assert.equal(error.code, 'govee_rejected');
+    assert.equal(error.status, 400);
+    assert.equal(error.message.includes('device does not support'), false);
+    return true;
+  });
+});

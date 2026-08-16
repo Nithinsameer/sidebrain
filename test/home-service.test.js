@@ -42,7 +42,7 @@ function harness() {
     goveeClient: client,
     now: () => new Date('2026-08-16T12:00:00Z'),
   });
-  return { service, controls, getDatabase: () => database };
+  return { service, client, controls, devices, getDatabase: () => database };
 }
 
 test('home service discovers all three bulbs, online state, useful capabilities, and every scene kind', async () => {
@@ -55,6 +55,32 @@ test('home service discovers all three bulbs, online state, useful capabilities,
   const scenes = await service.listScenes({ target: 'all' });
   assert.deepEqual(new Set(scenes.lights[0].scenes.map((scene) => scene.kind)), new Set(['dynamic', 'diy', 'snapshot']));
   assert.equal(JSON.stringify(scenes).includes('paramId'), false);
+});
+
+test('home service excludes Govee virtual groups that only mimic light power capability', async () => {
+  const virtualGroup = {
+    device: 'virtual-group-1',
+    deviceName: 'Bedroom',
+    sku: 'SameModeGroup',
+    type: '',
+    capabilities: [cap('devices.capabilities.on_off', 'powerSwitch', {
+      dataType: 'ENUM',
+      options: [{ name: 'on', value: 1 }, { name: 'off', value: 0 }],
+    })],
+  };
+  const { service, client, devices } = harness();
+  client.listDevices = async () => [...devices, virtualGroup];
+  client.getState = async (device) => {
+    assert.notEqual(device.sku, 'SameModeGroup');
+    return [
+      { type: 'devices.capabilities.online', instance: 'online', state: { value: true } },
+      { type: 'devices.capabilities.on_off', instance: 'powerSwitch', state: { value: 1 } },
+    ];
+  };
+  const result = await service.listLights({});
+
+  assert.equal(result.lights.length, 3);
+  assert.equal(result.lights.some((light) => light.model === 'SameModeGroup'), false);
 });
 
 test('home service validates discovered ranges and sends only discovered exact capability commands', async () => {
