@@ -22,6 +22,7 @@ const SECRET_VALUES = {
 
 let serverProcess;
 let temporaryDataDirectory;
+let temporaryMcpRuntimeDirectory;
 let baseUrl;
 let serverOutput = '';
 
@@ -94,6 +95,7 @@ function waitForServer() {
 
 test.before(async () => {
   temporaryDataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'sidebrain-security-test-'));
+  temporaryMcpRuntimeDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-mcp-'));
   fs.writeFileSync(
     path.join(temporaryDataDirectory, 'db.json'),
     JSON.stringify(testDatabase(), null, 2),
@@ -106,6 +108,7 @@ test.before(async () => {
       PORT: '0',
       SIDEBRAIN_DATA_DIR: temporaryDataDirectory,
       SIDEBRAIN_LISTEN_HOST: '127.0.0.1',
+      SIDEBRAIN_MCP_RUNTIME_DIR: temporaryMcpRuntimeDirectory,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -118,6 +121,7 @@ test.after(async () => {
     await once(serverProcess, 'exit');
   }
   if (temporaryDataDirectory) fs.rmSync(temporaryDataDirectory, { recursive: true, force: true });
+  if (temporaryMcpRuntimeDirectory) fs.rmSync(temporaryMcpRuntimeDirectory, { recursive: true, force: true });
 });
 
 test('GET /api/state preserves application data while redacting secret settings', async () => {

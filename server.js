@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
+const { createPrivateIpcServer } = require('./lib/private-ipc');
 
 const PORT = process.env.PORT || 4780;
 const LISTEN_HOST = process.env.SIDEBRAIN_LISTEN_HOST || undefined;
@@ -1207,14 +1208,56 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, LISTEN_HOST, () => {
+const ipcNow = process.env.NODE_ENV === 'test' && process.env.SIDEBRAIN_MCP_TEST_NOW
+  ? () => new Date(process.env.SIDEBRAIN_MCP_TEST_NOW)
+  : () => new Date();
+const privateIpc = createPrivateIpcServer({ getDatabase: () => db, now: ipcNow });
+
+async function start() {
+  await privateIpc.start();
+  try {
+    await new Promise((resolve, reject) => {
+      const onError = (error) => { server.off('listening', onListening); reject(error); };
+      const onListening = () => { server.off('error', onError); resolve(); };
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(PORT, LISTEN_HOST);
+    });
+  } catch (error) {
+    await privateIpc.close();
+    throw error;
+  }
+
   const ip = lanIp();
   const activePort = server.address().port;
   console.log(`\n  Sidebrain — for minds that never turn off`);
   console.log(`  ➜  http://localhost:${activePort}         (landing page)`);
   console.log(`  ➜  http://localhost:${activePort}/app     (your feed)`);
   if (ip && !LISTEN_HOST) console.log(`  ➜  http://${ip}:${activePort}/app   (phone, same Wi-Fi)`);
+  console.log(`  ➜  private MCP IPC: ready`);
   console.log(`  ➜  voice capture: Bearer token required at POST /api/capture`);
   console.log(`  ➜  voice cleanup: ${process.env.OPENAI_API_KEY ? 'OpenAI (' + (process.env.OPENAI_MODEL || 'gpt-4o-mini') + ')' : 'heuristic (set OPENAI_API_KEY for LLM cleanup)'}\n`);
   saveDb(); // persist a freshly generated capture token
+}
+
+let stopping = false;
+async function stop() {
+  if (stopping) return;
+  stopping = true;
+  await new Promise((resolve) => server.listening ? server.close(resolve) : resolve());
+  await privateIpc.close();
+}
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => {
+    stop().then(() => process.exit(0), (error) => {
+      console.error(`Sidebrain shutdown failed: ${String(error.message || error)}`);
+      process.exit(1);
+    });
+  });
+}
+
+start().catch((error) => {
+  console.error(`Sidebrain startup failed: ${String(error.message || error)}`);
+  process.exit(1);
 });

@@ -119,3 +119,17 @@ Sidebrain currently assumes a trusted personal environment: the Mac, its current
 - Before any public deployment, tailnet sharing, or access by untrusted LAN devices, add authentication and authorization, move traffic to HTTPS, review stored credentials and historical logs/backups, and harden all API routes.
 
 The planned ChatGPT integration must use a narrow local MCP sidecar over stdio and private IPC. Its IPC commands must be allowlisted, it must not expose the general Sidebrain HTTP API, and its responses must exclude credentials and unrelated Sidebrain state. MCP write tools remain disabled until durable task writes and the required tunnel-account association have been verified.
+
+## Read-only MCP sidecar
+
+Gate 2 adds a local stdio MCP sidecar with exactly one tool: `get_upcoming_tasks`. The sidecar never opens `data/db.json` or calls Sidebrain's HTTP API. Instead, the main Sidebrain process owns a Unix-domain socket and returns a bounded projection containing only task id, a one-line credential-redacted title, due date/time, and whether the task is overdue, due today, or upcoming.
+
+The main process creates a per-user runtime directory (`0700`), socket (`0600`), and ephemeral authorization token (`0600`). Both processes default to the same OS temporary runtime path; set `SIDEBRAIN_MCP_RUNTIME_DIR` for an isolated instance. The token is regenerated on every Sidebrain start and is never printed.
+
+Run the stdio sidecar with:
+
+```sh
+npm run mcp:stdio
+```
+
+The tool requires an IANA `timeZone` and accepts a 1–31 day window (default 7). It returns open scheduled tasks through that local-date window, including overdue tasks, with at most 100 results. It does not expose settings, credentials, uploads, reminders, note bodies, or unrelated database state. No write tools are present.

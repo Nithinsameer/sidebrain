@@ -5,6 +5,7 @@
   "description": "Sidebrain — your local, self-hosted private feed for your brain.",
   "scripts": {
     "start": "node server.js",
+    "mcp:stdio": "node mcp/sidebrain-mcp.js",
     "test": "node --test"
   }
 }
