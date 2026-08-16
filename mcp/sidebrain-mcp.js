@@ -340,14 +340,14 @@ const HOME_TOOLS = [
   },
   {
     name: 'control_lights', title: 'Control Govee lights',
-    description: 'Set discovered power, brightness, RGB, or color-temperature capabilities on one, several, or all lights. Exact state-setting is ordinary and does not need extra confirmation.',
+    description: 'Set discovered power, brightness, RGB, or color-temperature capabilities on one, several, or all lights. Results distinguish API acceptance from state confirmed by bounded polling; a stale state read never resends an accepted command.',
     inputSchema: { type: 'object', properties: { target: LIGHT_TARGET_SCHEMA, settings: LIGHT_SETTINGS_SCHEMA }, required: ['target', 'settings'], additionalProperties: false },
-    outputSchema: { type: 'object', properties: { changed: { type: 'array', items: { type: 'object' } }, settings: { type: 'object' } }, required: ['changed', 'settings'] },
+    outputSchema: { type: 'object', properties: { changed: { type: 'array', items: { type: 'object' } }, settings: { type: 'object' }, results: { type: 'array', items: { type: 'object' } } }, required: ['changed', 'settings', 'results'] },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
   {
     name: 'activate_light_scene', title: 'Activate a Govee scene',
-    description: 'Activate a discovered dynamic, DIY, or snapshot scene. Ordinary scene changes need no extra confirmation; alarm, flashing, emergency, lightning, police, or strobe-named scenes require confirmed=true.',
+    description: 'Activate a discovered dynamic, DIY, or snapshot scene. Results report API acceptance but cannot confirm active-scene state because Govee does not expose it. Ordinary scene changes need no extra confirmation; alarm, flashing, emergency, lightning, police, or strobe-named scenes require confirmed=true.',
     inputSchema: {
       type: 'object', properties: {
         target: LIGHT_TARGET_SCHEMA, kind: { type: 'string', enum: ['dynamic', 'diy', 'snapshot'] },
@@ -381,7 +381,7 @@ const HOME_TOOLS = [
     name: 'activate_light_preset', title: 'Activate a Sidebrain light preset',
     description: 'Activate one named Sidebrain multi-light preset. Focus, Reading, Movie, Wind Down, Night, and All Off are examples, not assumed defaults.',
     inputSchema: { type: 'object', properties: { name: { type: 'string', minLength: 1, maxLength: 80 } }, required: ['name'], additionalProperties: false },
-    outputSchema: { type: 'object', properties: { preset: { type: 'object' }, changed: { type: 'array', items: { type: 'object' } } }, required: ['preset', 'changed'] },
+    outputSchema: { type: 'object', properties: { preset: { type: 'object' }, changed: { type: 'array', items: { type: 'object' } }, results: { type: 'array', items: { type: 'object' } } }, required: ['preset', 'changed', 'results'] },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
 ];

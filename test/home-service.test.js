@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { createHomeService } = require('../lib/home-service');
+const { createHomeService, lightId } = require('../lib/home-service');
 
 const cap = (type, instance, parameters) => ({ type, instance, parameters });
 function fixtureDevices() {
@@ -41,6 +41,9 @@ function harness() {
     persistDatabase: () => {},
     goveeClient: client,
     now: () => new Date('2026-08-16T12:00:00Z'),
+    sleep: async () => {},
+    confirmationPollIntervalMs: 0,
+    confirmationPollAttempts: 2,
   });
   return { service, client, controls, devices, getDatabase: () => database };
 }
@@ -94,6 +97,42 @@ test('home service validates discovered ranges and sends only discovered exact c
   ]);
   await assert.rejects(service.controlLights({ target: [lights[0].id], settings: { colorTemperatureK: 9000 } }), /does not support/);
   await assert.rejects(service.controlLights({ target: [lights[0].id], settings: { power: true }, arbitrary: true }), (error) => error.code === 'invalid_request');
+});
+
+test('control verification polls through a stale first state without resending an accepted command', async () => {
+  let database = { sidebrainLightPresets: [] };
+  const device = fixtureDevices()[0];
+  const controls = [];
+  let stateReads = 0;
+  let sleeps = 0;
+  const service = createHomeService({
+    getDatabase: () => database,
+    replaceDatabase: (next) => { database = next; },
+    persistDatabase: () => {},
+    goveeClient: {
+      listDevices: async () => [structuredClone(device)],
+      control: async (_device, capability) => { controls.push(capability); return true; },
+      getState: async () => {
+        stateReads += 1;
+        return [{
+          type: 'devices.capabilities.range', instance: 'brightness',
+          state: { value: stateReads === 1 ? 42 : 55 },
+        }];
+      },
+    },
+    sleep: async () => { sleeps += 1; },
+    confirmationPollIntervalMs: 1_000,
+    confirmationPollAttempts: 6,
+  });
+
+  const result = await service.controlLights({ target: [lightId(device)], settings: { brightness: 55 } });
+
+  assert.equal(controls.length, 1);
+  assert.equal(stateReads, 2);
+  assert.equal(sleeps, 1);
+  assert.deepEqual(result.results.map(({ apiAccepted, stateConfirmed, confirmationAttempts }) => ({ apiAccepted, stateConfirmed, confirmationAttempts })), [
+    { apiAccepted: true, stateConfirmed: true, confirmationAttempts: 2 },
+  ]);
 });
 
 test('dynamic scene safeguards require confirmation only for disruptive names', async () => {
