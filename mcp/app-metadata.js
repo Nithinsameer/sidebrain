@@ -2,7 +2,7 @@
 
 const APP_METADATA_PROPOSAL = Object.freeze({
   displayName: 'Side Brain Tasks',
-  description: 'Sidebrain, also spoken or transcribed as Side Brain or side-brain, is Sameer\u2019s personal task and Discord reminder system.',
+  description: 'Sidebrain, also spoken or transcribed as Side Brain or side-brain, is Sameer\u2019s personal task, Discord reminder, Govee lighting, and Codex delegation system.',
   promptTests: Object.freeze([
     Object.freeze({
       prompt: 'Sidebrain, remind me to check the oven at 8:30 PM tonight.',

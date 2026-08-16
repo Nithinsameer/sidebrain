@@ -101,6 +101,7 @@ test.before(async () => {
       SIDEBRAIN_LISTEN_HOST: '127.0.0.1',
       SIDEBRAIN_MCP_RUNTIME_DIR: runtimeDirectory,
       SIDEBRAIN_MCP_TEST_NOW: FIXED_NOW,
+      SIDEBRAIN_GOVEE_KEY_FILE: path.join(runtimeDirectory, 'missing-govee-key'),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -127,7 +128,7 @@ test('IPC authorization rejects missing and invalid credentials and protects run
   assert.deepEqual(invalid, { ok: false, error: 'unauthorized' });
 });
 
-test('authorized IPC is allowlisted to exactly the six task actions', async () => {
+test('authorized IPC is allowlisted to the narrow Sidebrain actions', async () => {
   const authorization = fs.readFileSync(tokenPath, 'utf8').trim();
   const unsupported = await ipcRequest({ action: 'read_database', authorization, params: {} });
   assert.deepEqual(unsupported, { ok: false, error: 'unsupported action' });
@@ -153,6 +154,13 @@ test('authorized IPC is allowlisted to exactly the six task actions', async () =
   });
   assert.equal(malformed.ok, false);
   assert.equal(malformed.code, 'invalid_request');
+
+  const unconfiguredGovee = await ipcRequest({
+    action: 'list_lights', authorization, params: {},
+  });
+  assert.deepEqual(unconfiguredGovee, {
+    ok: false, error: 'Govee is not configured', code: 'govee_not_configured',
+  });
 
   const created = await ipcRequest({
     action: 'create_task',
@@ -369,7 +377,7 @@ test('a second main process cannot replace an active private socket', async () =
   assert.equal(stillAvailable.ok, true);
 });
 
-test('local stdio MCP inspection lists and calls exactly six annotated tools', async () => {
+test('local stdio MCP inspection lists annotated task, home, and delegation tools', async () => {
   const sidecar = spawn(process.execPath, ['mcp/sidebrain-mcp.js'], {
     cwd: ROOT,
     env: { ...process.env, SIDEBRAIN_MCP_RUNTIME_DIR: runtimeDirectory },
@@ -406,6 +414,11 @@ test('local stdio MCP inspection lists and calls exactly six annotated tools', a
   assert.deepEqual(listed.result.tools.map((tool) => tool.name), [
     'get_upcoming_tasks', 'find_tasks', 'create_task', 'create_reminder_task',
     'set_task_completion', 'get_task_receipt',
+    'list_lights', 'list_light_scenes', 'control_lights', 'activate_light_scene',
+    'list_light_presets', 'save_light_preset', 'activate_light_preset',
+    'claim_oldest_codex_task', 'get_codex_task_brief', 'record_codex_progress',
+    'mark_codex_waiting', 'complete_codex_delegation', 'fail_codex_delegation',
+    'release_expired_codex_claims', 'requeue_codex_task', 'get_codex_delegation_status',
   ]);
   const tools = Object.fromEntries(listed.result.tools.map((tool) => [tool.name, tool]));
   assert.equal(tools.get_upcoming_tasks.annotations.readOnlyHint, true);
@@ -425,6 +438,14 @@ test('local stdio MCP inspection lists and calls exactly six annotated tools', a
   });
   assert.equal(tools.set_task_completion.annotations.readOnlyHint, false);
   assert.equal(tools.create_task.annotations.idempotentHint, true);
+  assert.deepEqual(tools.list_lights.annotations, {
+    readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true,
+  });
+  assert.equal(tools.control_lights.annotations.readOnlyHint, false);
+  assert.equal(tools.control_lights.annotations.destructiveHint, false);
+  assert.equal(tools.activate_light_scene.annotations.idempotentHint, false);
+  assert.equal(tools.get_codex_delegation_status.annotations.readOnlyHint, true);
+  assert.equal(tools.complete_codex_delegation.annotations.destructiveHint, true);
   assert.equal('discordReminders' in tools.create_task.inputSchema.properties, false);
   assert.deepEqual(Object.keys(tools.create_task.inputSchema.properties.followUp.properties), ['date']);
   assert.equal(tools.set_task_completion.annotations.destructiveHint, true);
