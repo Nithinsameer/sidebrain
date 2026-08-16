@@ -19,6 +19,7 @@ let socketPath;
 let tokenPath;
 let serverProcess;
 let serverOutput = '';
+let baseUrl;
 
 function fixtureDatabase() {
   return {
@@ -52,6 +53,9 @@ function waitForServer() {
       serverOutput += chunk.toString();
       if (serverOutput.includes('private MCP IPC: ready')) {
         clearTimeout(timeout);
+        const port = /http:\/\/localhost:(\d+)/.exec(serverOutput)?.[1];
+        if (!port) return reject(new Error(`server port was not reported\n${serverOutput}`));
+        baseUrl = `http://127.0.0.1:${port}`;
         resolve();
       }
     };
@@ -123,10 +127,12 @@ test('IPC authorization rejects missing and invalid credentials and protects run
   assert.deepEqual(invalid, { ok: false, error: 'unauthorized' });
 });
 
-test('authorized IPC is allowlisted to the read-only task action', async () => {
+test('authorized IPC is allowlisted to exactly the five task actions', async () => {
   const authorization = fs.readFileSync(tokenPath, 'utf8').trim();
   const unsupported = await ipcRequest({ action: 'read_database', authorization, params: {} });
   assert.deepEqual(unsupported, { ok: false, error: 'unsupported action' });
+  const invalidShape = await ipcRequest({ action: 'create_task', authorization, params: [] });
+  assert.deepEqual(invalidShape, { ok: false, error: 'invalid request', code: 'invalid_request' });
 
   const response = await ipcRequest({
     action: 'get_upcoming_tasks',
@@ -141,6 +147,122 @@ test('authorized IPC is allowlisted to the read-only task action', async () => {
     dueTime: '10:00',
     timing: 'today',
   }]);
+
+  const malformed = await ipcRequest({
+    action: 'create_task', authorization, params: { origin: 'chatgpt', title: 'Missing idempotency key' },
+  });
+  assert.equal(malformed.ok, false);
+  assert.equal(malformed.code, 'invalid_request');
+
+  const created = await ipcRequest({
+    action: 'create_task',
+    authorization,
+    params: {
+      idempotencyKey: 'ipc-create-task-0001',
+      origin: 'chatgpt_voice',
+      title: 'Pick up dry cleaning',
+      discordReminders: [{ date: '2026-08-20', time: '17:00', timeZone: 'America/New_York' }],
+    },
+  });
+  assert.equal(created.ok, true);
+  assert.equal(created.result.durable, true);
+  assert.equal(created.result.task.title, 'Pick up dry cleaning');
+  assert.equal(created.result.reminders[0].state, 'scheduled');
+
+  const found = await ipcRequest({
+    action: 'find_tasks', authorization, params: { query: 'dry cleaning' },
+  });
+  assert.equal(found.ok, true);
+  assert.deepEqual(found.result.tasks.map((task) => task.id), [created.result.task.id]);
+  assert.equal(found.result.tasks[0].remindersPending, true);
+
+  const receipt = await ipcRequest({
+    action: 'get_task_receipt', authorization, params: { taskId: created.result.task.id },
+  });
+  assert.deepEqual(receipt.result, created.result);
+
+  const completed = await ipcRequest({
+    action: 'set_task_completion',
+    authorization,
+    params: {
+      idempotencyKey: 'ipc-complete-task-01',
+      origin: 'chatgpt_voice',
+      taskId: created.result.task.id,
+      completed: true,
+    },
+  });
+  assert.equal(completed.ok, true);
+  assert.equal(completed.result.task.completed, true);
+  assert.equal(completed.result.reminders[0].state, 'cancelled');
+});
+
+test('PWA completion cancels Gate 3 reminders and reopening does not re-arm them', async () => {
+  const authorization = fs.readFileSync(tokenPath, 'utf8').trim();
+  const created = await ipcRequest({
+    action: 'create_task',
+    authorization,
+    params: {
+      idempotencyKey: 'pwa-path-create-001',
+      origin: 'chatgpt',
+      title: 'PWA completion integration',
+      discordReminders: [{ date: '2026-08-21', time: '09:00', timeZone: 'America/New_York' }],
+    },
+  });
+  const taskId = created.result.task.id;
+
+  const completedResponse = await fetch(`${baseUrl}/api/messages/${taskId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ done: true }),
+  });
+  assert.equal(completedResponse.status, 200);
+  const completedTask = await completedResponse.json();
+  assert.equal(completedTask.id, taskId);
+  assert.equal(completedTask.done, true);
+  assert.equal('result' in completedTask, false);
+  assert.equal('receipt' in completedTask, false);
+
+  const cancelledReceipt = await ipcRequest({
+    action: 'get_task_receipt', authorization, params: { taskId },
+  });
+  assert.equal(cancelledReceipt.result.task.completed, true);
+  assert.equal(cancelledReceipt.result.reminders[0].state, 'cancelled');
+
+  const reopenedResponse = await fetch(`${baseUrl}/api/messages/${taskId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ done: false }),
+  });
+  assert.equal(reopenedResponse.status, 200);
+  const reopenedTask = await reopenedResponse.json();
+  assert.equal(reopenedTask.id, taskId);
+  assert.equal(reopenedTask.done, false);
+  const reopenedReceipt = await ipcRequest({
+    action: 'get_task_receipt', authorization, params: { taskId },
+  });
+  assert.equal(reopenedReceipt.result.task.completed, false);
+  assert.equal(reopenedReceipt.result.reminders[0].state, 'cancelled');
+});
+
+test('PWA completion remains compatible with legacy tasks', async () => {
+  const authorization = fs.readFileSync(tokenPath, 'utf8').trim();
+  for (const done of [true, false]) {
+    const response = await fetch(`${baseUrl}/api/messages/integration-task`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ done }),
+    });
+    assert.equal(response.status, 200);
+    const task = await response.json();
+    assert.equal(task.id, 'integration-task');
+    assert.equal(task.done, done);
+  }
+  const receipt = await ipcRequest({
+    action: 'get_task_receipt', authorization, params: { taskId: 'integration-task' },
+  });
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.result.origin, 'pwa');
+  assert.equal(receipt.result.task.completed, false);
 });
 
 test('a second main process cannot replace an active private socket', async () => {
@@ -174,7 +296,7 @@ test('a second main process cannot replace an active private socket', async () =
   assert.equal(stillAvailable.ok, true);
 });
 
-test('local stdio MCP inspection lists and calls exactly one read-only tool', async () => {
+test('local stdio MCP inspection lists and calls exactly five annotated tools', async () => {
   const sidecar = spawn(process.execPath, ['mcp/sidebrain-mcp.js'], {
     cwd: ROOT,
     env: { ...process.env, SIDEBRAIN_MCP_RUNTIME_DIR: runtimeDirectory },
@@ -205,8 +327,34 @@ test('local stdio MCP inspection lists and calls exactly one read-only tool', as
   sidecar.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
 
   const listed = await rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
-  assert.deepEqual(listed.result.tools.map((tool) => tool.name), ['get_upcoming_tasks']);
-  assert.equal(listed.result.tools[0].annotations.readOnlyHint, true);
+  assert.deepEqual(listed.result.tools.map((tool) => tool.name), [
+    'get_upcoming_tasks', 'find_tasks', 'create_task', 'set_task_completion', 'get_task_receipt',
+  ]);
+  const tools = Object.fromEntries(listed.result.tools.map((tool) => [tool.name, tool]));
+  assert.equal(tools.get_upcoming_tasks.annotations.readOnlyHint, true);
+  assert.deepEqual(tools.find_tasks.annotations, {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  });
+  assert.equal(tools.get_task_receipt.annotations.readOnlyHint, true);
+  assert.equal(tools.create_task.annotations.readOnlyHint, false);
+  assert.equal(tools.set_task_completion.annotations.readOnlyHint, false);
+  assert.equal(tools.create_task.annotations.idempotentHint, true);
+  assert.equal(tools.set_task_completion.annotations.destructiveHint, true);
+  assert.match(tools.create_task.description, /confirm with the user/i);
+  assert.match(tools.set_task_completion.description, /confirm the exact task/i);
+  assert.match(tools.set_task_completion.description, /first use find_tasks/i);
+  assert.match(tools.set_task_completion.description, /ask the user to choose/i);
+
+  const malformedArguments = await rpc({
+    jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'create_task', arguments: [] },
+  });
+  assert.equal(malformedArguments.error.code, -32602);
+  sidecar.stdin.write('{\n');
+  const parseError = await nextResponse();
+  assert.equal(parseError.error.code, -32700);
 
   const called = await rpc({
     jsonrpc: '2.0', id: 3, method: 'tools/call',
@@ -225,13 +373,56 @@ test('local stdio MCP inspection lists and calls exactly one read-only tool', as
     'private-automation-39edcc',
   ]) assert.equal(serialized.includes(excluded), false);
 
+  const created = await rpc({
+    jsonrpc: '2.0', id: 4, method: 'tools/call',
+    params: {
+      name: 'create_task',
+      arguments: { idempotencyKey: 'mcp-voice-create-01', origin: 'chatgpt_voice', title: 'Water the plants' },
+    },
+  });
+  assert.equal(created.result.isError, undefined);
+  assert.equal(created.result.structuredContent.durable, true);
+  assert.equal(created.result.structuredContent.task.title, 'Water the plants');
+  assert.deepEqual(created.result.structuredContent.reminders, []);
+
+  const taskId = created.result.structuredContent.task.id;
+  const found = await rpc({
+    jsonrpc: '2.0', id: 21, method: 'tools/call',
+    params: { name: 'find_tasks', arguments: { query: 'water plants', status: 'open' } },
+  });
+  assert.equal(found.result.isError, undefined);
+  assert.deepEqual(found.result.structuredContent.tasks.map((task) => task.id), [taskId]);
+  assert.equal(found.result.structuredContent.tasks[0].dueDate, null);
+  const verified = await rpc({
+    jsonrpc: '2.0', id: 5, method: 'tools/call',
+    params: { name: 'get_task_receipt', arguments: { taskId } },
+  });
+  assert.equal(verified.result.structuredContent.task.id, taskId);
+
+  const completed = await rpc({
+    jsonrpc: '2.0', id: 6, method: 'tools/call',
+    params: {
+      name: 'set_task_completion',
+      arguments: { idempotencyKey: 'mcp-completion-0001', origin: 'chatgpt_voice', taskId, completed: true },
+    },
+  });
+  assert.equal(completed.result.structuredContent.task.completed, true);
+
+  const unknown = await rpc({
+    jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'read_database', arguments: {} },
+  });
+  assert.equal(unknown.error.code, -32602);
+
   sidecar.stdin.end();
   await once(sidecar, 'exit');
   assert.equal(sidecar.exitCode, 0);
 });
 
-test('the stdio sidecar contains no direct database access path', () => {
+test('the stdio sidecar contains no direct database access path or generic capabilities', () => {
   const source = fs.readFileSync(path.join(ROOT, 'mcp', 'sidebrain-mcp.js'), 'utf8');
   assert.equal(source.includes('db.json'), false);
   assert.equal(source.includes('SIDEBRAIN_DATA_DIR'), false);
+  for (const forbidden of ['read_database', 'update_database', 'delete_task', 'fetch_url', 'shell_command']) {
+    assert.equal(source.includes(`name: '${forbidden}'`), false);
+  }
 });

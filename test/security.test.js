@@ -69,6 +69,20 @@ function testDatabase() {
       due: '2099-01-01T12:00:00.000Z',
       done: false,
       createdAt: '2026-01-01T12:00:00.000Z',
+    }, {
+      id: 'internal-discord-reminder',
+      text: 'Internal Discord reminder',
+      due: '2099-01-02T12:00:00.000Z',
+      scheduledForUtc: '2099-01-02T12:00:00.000Z',
+      channel: 'discord',
+      state: 'scheduled',
+      leaseToken: 'internal-lease-secret-96c1',
+      done: false,
+    }],
+    taskOperations: [{
+      id: 'internal-operation',
+      idempotencyKey: 'internal-idempotency-secret-402d',
+      payloadHash: 'internal-payload-hash',
     }],
   };
 }
@@ -133,8 +147,12 @@ test('GET /api/state preserves application data while redacting secret settings'
   assert.equal(state.settings.theme, 'dark');
   assert.equal(state.messages[0].id, 'existing-note');
   assert.equal(state.reminders[0].id, 'existing-reminder');
+  assert.equal(state.reminders.length, 1);
   assert.equal(state.habits['2026-01-01'].gym, true);
   assert.equal('discordLastMsgId' in state.settings, false);
+  assert.equal('taskOperations' in state, false);
+  assert.equal(serialized.includes('internal-lease-secret-96c1'), false);
+  assert.equal(serialized.includes('internal-idempotency-secret-402d'), false);
 
   for (const [key, value] of Object.entries(SECRET_VALUES)) {
     assert.equal(key in state.settings, false, `${key} must not be returned`);
