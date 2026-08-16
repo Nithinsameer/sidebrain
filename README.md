@@ -15,7 +15,7 @@ Then open:
 - **http://localhost:4780** — landing page
 - **http://localhost:4780/app** — your feed
 
-Use a different port with `PORT=5000 node server.js`. The startup log prints your LAN URL (for your phone) and your capture token (for Apple Shortcuts).
+Use a different port with `PORT=5000 node server.js`. The startup log prints your LAN URL for phone and tablet access. Stored credentials, including the Apple Shortcut capture token, are not printed or returned by the API.
 
 ## Where your data lives
 
@@ -64,7 +64,7 @@ Back up the `data/` folder and you've backed up everything. Settings also has on
 
 You already have: Action button → record → OpenAI transcription → text. Point that text here:
 
-1. Get your **capture token**: shown in the server startup log, or Settings → Capture token → Copy.
+1. Use your existing **capture token**. Sidebrain intentionally does not return it through the PWA or API. For a first-time local setup, retrieve it directly from `data/db.json` on the trusted Mac.
 2. In Shortcuts, after your transcription step, add **Get Contents of URL**:
    - URL: `http://<your-mac>:4780/api/capture` (LAN IP from the startup log, or Tailscale name)
    - Method: **POST**, Request Body: **JSON** with field `text` = the transcribed text
@@ -107,3 +107,15 @@ launchctl load ~/Library/LaunchAgents/com.sidebrain.server.plist
 ```
 
 Your Mac must be awake to serve requests — in System Settings → Battery, enable "Prevent automatic sleeping on power adapter" (or run `caffeinate -s` while plugged in).
+
+## Security boundary
+
+Sidebrain currently assumes a trusted personal environment: the Mac, its current LAN, and its private Tailscale network. The HTTP API is not authenticated, and service credentials remain in plaintext in `data/db.json`, historical backups, and local logs. Those are accepted constraints for personal use on these trusted networks.
+
+- Do not configure Tailscale Funnel, forward port 4780 from a router, or otherwise publish Sidebrain to the internet.
+- Do not share the tailnet with untrusted users or use Sidebrain on an untrusted LAN without revisiting authentication and transport security.
+- API settings responses expose only configured/not-configured flags for credentials. Credential values remain write-only through the PWA and must never be returned to ChatGPT or MCP clients.
+- Existing LAN, Tailscale PWA, and Authorization-header Apple Shortcut access are intentional and supported.
+- Before any public deployment, tailnet sharing, or access by untrusted LAN devices, add authentication and authorization, move traffic to HTTPS, review stored credentials and historical logs/backups, and harden all API routes.
+
+The planned ChatGPT integration must use a narrow local MCP sidecar over stdio and private IPC. Its IPC commands must be allowlisted, it must not expose the general Sidebrain HTTP API, and its responses must exclude credentials and unrelated Sidebrain state. MCP write tools remain disabled until durable task writes and the required tunnel-account association have been verified.

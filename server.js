@@ -15,9 +15,10 @@ const crypto = require('crypto');
 const os = require('os');
 
 const PORT = process.env.PORT || 4780;
+const LISTEN_HOST = process.env.SIDEBRAIN_LISTEN_HOST || undefined;
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
-const DATA_DIR = path.join(ROOT, 'data');
+const DATA_DIR = path.resolve(process.env.SIDEBRAIN_DATA_DIR || path.join(ROOT, 'data'));
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const DB_PATH = path.join(DATA_DIR, 'db.json');
 
@@ -49,6 +50,36 @@ const DEFAULT_DB = {
   messages: [],   // {id, text, createdAt, pinned, tagIds[], files[], list, checked[], canvas:{on,x,y}}
   reminders: [],  // {id, text, due, done, createdAt}
 };
+
+const PUBLIC_SETTING_KEYS = [
+  'theme',
+  'font',
+  'compact',
+  'hideTagNav',
+  'groupByTime',
+  'boardColumns',
+  'aiBaseUrl',
+  'aiModel',
+  'digestHour',
+];
+
+const SECRET_SETTING_KEYS = [
+  'captureToken',
+  'openaiKey',
+  'ntfyTopic',
+  'discordWebhook',
+  'discordBotToken',
+  'discordCaptureChannel',
+  'telegramToken',
+  'telegramChatId',
+];
+
+function publicSettings(settings) {
+  const safe = {};
+  for (const key of PUBLIC_SETTING_KEYS) safe[key] = settings[key];
+  for (const key of SECRET_SETTING_KEYS) safe[`${key}Configured`] = !!String(settings[key] || '').trim();
+  return safe;
+}
 
 function loadDb() {
   try {
@@ -830,14 +861,17 @@ async function handleApi(req, res, pathname) {
   // ---- state
   if (resource === 'state' && method === 'GET') {
     const ip = lanIp();
-    return send(res, 200, { ...db, meta: { lanUrl: ip ? `http://${ip}:${PORT}` : null } });
+    return send(res, 200, { ...db, settings: publicSettings(db.settings), meta: { lanUrl: ip ? `http://${ip}:${PORT}` : null } });
   }
 
   // ---- voice / external capture (Apple Shortcuts etc.)
   if (resource === 'capture' && method === 'POST') {
+    const captureUrl = new URL(req.url, 'http://x');
+    if (captureUrl.searchParams.has('token')) {
+      return send(res, 400, { error: 'capture token must be sent in the Authorization header' });
+    }
     const auth = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    const token = auth || new URL(req.url, 'http://x').searchParams.get('token') || '';
-    if (token !== db.settings.captureToken) return send(res, 401, { error: 'invalid capture token' });
+    if (auth !== db.settings.captureToken) return send(res, 401, { error: 'invalid capture token' });
     const body = await readBody(req);
     const raw = String(body.text || '').trim();
     if (!raw) return send(res, 400, { error: 'text required' });
@@ -855,7 +889,7 @@ async function handleApi(req, res, pathname) {
     const body = await readBody(req);
     db.settings = { ...db.settings, ...body };
     saveDb();
-    return send(res, 200, db.settings);
+    return send(res, 200, publicSettings(db.settings));
   }
 
   // ---- messages
@@ -1173,13 +1207,14 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, LISTEN_HOST, () => {
   const ip = lanIp();
+  const activePort = server.address().port;
   console.log(`\n  Sidebrain — for minds that never turn off`);
-  console.log(`  ➜  http://localhost:${PORT}         (landing page)`);
-  console.log(`  ➜  http://localhost:${PORT}/app     (your feed)`);
-  if (ip) console.log(`  ➜  http://${ip}:${PORT}/app   (phone, same Wi-Fi)`);
-  console.log(`  ➜  capture token: ${db.settings.captureToken}  (for Apple Shortcuts → POST /api/capture)`);
+  console.log(`  ➜  http://localhost:${activePort}         (landing page)`);
+  console.log(`  ➜  http://localhost:${activePort}/app     (your feed)`);
+  if (ip && !LISTEN_HOST) console.log(`  ➜  http://${ip}:${activePort}/app   (phone, same Wi-Fi)`);
+  console.log(`  ➜  voice capture: Bearer token required at POST /api/capture`);
   console.log(`  ➜  voice cleanup: ${process.env.OPENAI_API_KEY ? 'OpenAI (' + (process.env.OPENAI_MODEL || 'gpt-4o-mini') + ')' : 'heuristic (set OPENAI_API_KEY for LLM cleanup)'}\n`);
   saveDb(); // persist a freshly generated capture token
 });

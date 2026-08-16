@@ -29,6 +29,17 @@ const FONTS = {
   classic: { label: 'Classic',    css: 'var(--font-classic)' },
 };
 
+const SECRET_SETTING_KEYS = new Set([
+  'captureToken',
+  'openaiKey',
+  'ntfyTopic',
+  'discordWebhook',
+  'discordBotToken',
+  'discordCaptureChannel',
+  'telegramToken',
+  'telegramChatId',
+]);
+
 // ---------------------------------------------------------------- state
 
 let S = { settings: {}, tags: [], messages: [], reminders: [] };
@@ -69,9 +80,14 @@ async function api(method, path, body) {
 async function loadState() { S = await api('GET', 'state'); }
 
 async function patchSettings(patch) {
-  Object.assign(S.settings, patch);
+  for (const [key, value] of Object.entries(patch)) {
+    if (!SECRET_SETTING_KEYS.has(key)) S.settings[key] = value;
+  }
   applySettings();
-  try { await api('PATCH', 'settings', patch); } catch { toast('Failed to save settings'); }
+  try {
+    Object.assign(S.settings, await api('PATCH', 'settings', patch));
+    applySettings();
+  } catch { toast('Failed to save settings'); }
 }
 
 // ---------------------------------------------------------------- utils
@@ -1020,6 +1036,7 @@ function checkDueReminders() {
 // ---- settings
 function openSettingsModal() {
   const s = S.settings;
+  const secretPlaceholder = (configured, empty) => configured ? 'Configured — enter a new value to replace' : empty;
   const box = openModal(`
     <h2>Settings</h2>
     <p class="sub">Everything is stored locally in <b>data/db.json</b>.</p>
@@ -1055,9 +1072,9 @@ function openSettingsModal() {
     <div class="setrow" style="flex-wrap:wrap">
       <div class="info"><b>Discord capture</b><span>Queued capture: message your capture channel from anywhere — Discord holds it until this Mac picks it up (✅ = saved). Needs a bot token + channel ID.</span></div>
       <div style="display:flex;gap:8px;width:100%;margin-top:4px">
-        <input type="password" id="dcBotToken" placeholder="bot token" value="${esc(S.settings.discordBotToken || '')}"
+        <input type="password" id="dcBotToken" placeholder="${secretPlaceholder(s.discordBotTokenConfigured, 'bot token')}" value=""
           style="flex:1.2;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:10px;outline:none" />
-        <input type="text" id="dcChannel" placeholder="channel ID" value="${esc(S.settings.discordCaptureChannel || '')}"
+        <input type="text" id="dcChannel" placeholder="${secretPlaceholder(s.discordCaptureChannelConfigured, 'channel ID')}" value=""
           style="flex:.8;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:10px;outline:none" />
         <button class="btn" id="dcSave">Save</button>
       </div>
@@ -1081,13 +1098,13 @@ function openSettingsModal() {
 
     <div class="setrow">
       <div class="info"><b>Capture token</b><span>Lets Apple Shortcuts (voice capture) post into your feed via <b>POST /api/capture</b>.</span></div>
-      <button class="btn" id="copyToken">Copy token</button>
+      <button class="btn" id="copyToken">${s.captureTokenConfigured ? 'Token configured' : 'Token unavailable'}</button>
     </div>
 
     <div class="setrow" style="flex-wrap:wrap">
       <div class="info"><b>AI assistant</b><span>Powers the <b>Ask</b> tab and voice-capture cleanup. Paste an OpenAI API key (gpt-4o-mini costs pennies). For free options: a Groq key with base URL <b>https://api.groq.com/openai/v1</b>, or local Ollama with <b>http://localhost:11434/v1</b>.</span></div>
       <div style="display:grid;gap:8px;width:100%;margin-top:4px">
-        <input type="password" id="aiKey" placeholder="API key — sk-..." value="${esc(S.settings.openaiKey || '')}"
+        <input type="password" id="aiKey" placeholder="${secretPlaceholder(s.openaiKeyConfigured, 'API key — sk-...')}" value=""
           style="padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:10px;outline:none" />
         <div style="display:flex;gap:8px">
           <input type="text" id="aiBaseUrl" placeholder="base URL (optional)" value="${esc(S.settings.aiBaseUrl || '')}"
@@ -1102,18 +1119,18 @@ function openSettingsModal() {
     <div class="setrow" style="flex-wrap:wrap">
       <div class="info"><b>Push notifications</b><span>Fill in any channel(s) you use — pushes go to all of them. Discord is the most reliable on iPhone; ntfy is the simplest; Telegram works too.</span></div>
       <div style="display:grid;gap:8px;width:100%;margin-top:4px">
-        <input type="text" id="ntfyTopic" placeholder="ntfy topic — e.g. sidebrain-${(S.settings.captureToken || 'topic').slice(0, 8)}"
-          value="${esc(S.settings.ntfyTopic || '')}"
+        <input type="text" id="ntfyTopic" placeholder="${secretPlaceholder(s.ntfyTopicConfigured, 'ntfy topic')}"
+          value=""
           style="padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:10px;outline:none" />
-        <input type="text" id="discordWebhook" placeholder="Discord webhook URL — https://discord.com/api/webhooks/…"
-          value="${esc(S.settings.discordWebhook || '')}"
+        <input type="text" id="discordWebhook" placeholder="${secretPlaceholder(s.discordWebhookConfigured, 'Discord webhook URL — https://discord.com/api/webhooks/…')}"
+          value=""
           style="padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:10px;outline:none" />
         <div style="display:flex;gap:8px">
-          <input type="text" id="telegramToken" placeholder="Telegram bot token (optional)"
-            value="${esc(S.settings.telegramToken || '')}"
+          <input type="text" id="telegramToken" placeholder="${secretPlaceholder(s.telegramTokenConfigured, 'Telegram bot token (optional)')}"
+            value=""
             style="flex:1.4;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:10px;outline:none" />
-          <input type="text" id="telegramChatId" placeholder="chat id"
-            value="${esc(S.settings.telegramChatId || '')}"
+          <input type="text" id="telegramChatId" placeholder="${secretPlaceholder(s.telegramChatIdConfigured, 'chat id')}"
+            value=""
             style="flex:.6;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:10px;outline:none" />
         </div>
         <button class="btn primary" id="ntfySave" style="justify-self:end">Save &amp; test all</button>
@@ -1136,36 +1153,39 @@ function openSettingsModal() {
   $('#openTrash', box).onclick = openTrashModal;
   $('#openCirculations', box).onclick = openCirculationsModal;
   $('#dcSave', box).onclick = () => {
-    patchSettings({
-      discordBotToken: $('#dcBotToken', box).value.trim(),
-      discordCaptureChannel: $('#dcChannel', box).value.trim(),
-      discordLastMsgId: null, // re-baseline so old history isn't ingested
-    });
-    toast($('#dcBotToken', box).value.trim() ? 'Discord capture saved — message the channel to test' : 'Discord capture off');
+    const token = $('#dcBotToken', box).value.trim();
+    const channel = $('#dcChannel', box).value.trim();
+    const patch = {};
+    if (token) patch.discordBotToken = token;
+    if (channel) patch.discordCaptureChannel = channel;
+    if (!token && !channel) {
+      toast('Enter a new value to replace the configured Discord capture settings');
+      return;
+    }
+    patch.discordLastMsgId = null; // re-baseline so old history isn't ingested
+    patchSettings(patch);
+    toast('Discord capture saved — message the channel to test');
   };
 
   $('#aiSave', box).onclick = () => {
-    patchSettings({
-      openaiKey: $('#aiKey', box).value.trim(),
+    const patch = {
       aiBaseUrl: $('#aiBaseUrl', box).value.trim(),
       aiModel: $('#aiModel', box).value.trim(),
-    });
-    toast($('#aiKey', box).value.trim() ? 'AI settings saved — try the Ask tab' : 'AI key cleared');
+    };
+    const key = $('#aiKey', box).value.trim();
+    if (key) patch.openaiKey = key;
+    patchSettings(patch);
+    toast(key || s.openaiKeyConfigured ? 'AI settings saved — try the Ask tab' : 'AI settings saved — add an API key to enable remote AI');
   };
 
   $('#ntfySave', box).onclick = async () => {
-    const payload = {
+    const values = {
       topic: $('#ntfyTopic', box).value.trim(),
       discordWebhook: $('#discordWebhook', box).value.trim(),
       telegramToken: $('#telegramToken', box).value.trim(),
       telegramChatId: $('#telegramChatId', box).value.trim(),
     };
-    Object.assign(S.settings, { ntfyTopic: payload.topic, discordWebhook: payload.discordWebhook, telegramToken: payload.telegramToken, telegramChatId: payload.telegramChatId });
-    if (!payload.topic && !payload.discordWebhook && !(payload.telegramToken && payload.telegramChatId)) {
-      try { await api('POST', 'ntfy-test', payload); } catch {}
-      toast('Push notifications turned off');
-      return;
-    }
+    const payload = Object.fromEntries(Object.entries(values).filter(([, value]) => value));
     try {
       const { channels } = await api('POST', 'ntfy-test', payload);
       const sent = [channels.ntfy && 'ntfy', channels.discord && 'Discord', channels.telegram && 'Telegram'].filter(Boolean);
@@ -1174,10 +1194,7 @@ function openSettingsModal() {
   };
 
   $('#copyToken', box).onclick = async () => {
-    try {
-      await navigator.clipboard.writeText(S.settings.captureToken || '');
-      toast('Capture token copied');
-    } catch { toast('Copy failed — token is in data/db.json'); }
+    toast('Capture token is hidden; existing Apple Shortcuts continue to work');
   };
 
   $('#setTheme', box).onclick = function () {
