@@ -127,7 +127,7 @@ test('IPC authorization rejects missing and invalid credentials and protects run
   assert.deepEqual(invalid, { ok: false, error: 'unauthorized' });
 });
 
-test('authorized IPC is allowlisted to exactly the five task actions', async () => {
+test('authorized IPC is allowlisted to exactly the six task actions', async () => {
   const authorization = fs.readFileSync(tokenPath, 'utf8').trim();
   const unsupported = await ipcRequest({ action: 'read_database', authorization, params: {} });
   assert.deepEqual(unsupported, { ok: false, error: 'unsupported action' });
@@ -168,6 +168,65 @@ test('authorized IPC is allowlisted to exactly the five task actions', async () 
   assert.equal(created.result.durable, true);
   assert.equal(created.result.task.title, 'Pick up dry cleaning');
   assert.equal(created.result.reminders[0].state, 'scheduled');
+
+  const reminderTask = await ipcRequest({
+    action: 'create_reminder_task',
+    authorization,
+    params: {
+      idempotency_key: 'ipc-voice-reminder-01',
+      origin: 'chatgpt_voice',
+      title: 'Voice reminder integration',
+      reminder_at: '2026-08-16T00:45',
+      timezone: 'America/New_York',
+    },
+  });
+  assert.equal(reminderTask.ok, true);
+  assert.equal(reminderTask.result.operationType, 'create_reminder_task');
+  assert.deepEqual(reminderTask.result.task.tags, ['Reminder']);
+  assert.deepEqual(reminderTask.result.task.due, {
+    date: '2026-08-16',
+    time: '00:45',
+    timeZone: 'America/New_York',
+    atUtc: '2026-08-16T04:45:00.000Z',
+  });
+  assert.equal(reminderTask.result.reminders.length, 1);
+  assert.equal(reminderTask.result.reminders[0].state, 'scheduled');
+
+  const persistedBeforeReads = fs.readFileSync(path.join(dataDirectory, 'db.json'), 'utf8');
+  const replayedReminderTask = await ipcRequest({
+    action: 'create_reminder_task',
+    authorization,
+    params: {
+      idempotency_key: 'ipc-voice-reminder-01',
+      origin: 'chatgpt_voice',
+      title: 'Voice reminder integration',
+      reminder_at: '2026-08-16T00:45',
+      timezone: 'America/New_York',
+    },
+  });
+  assert.deepEqual(replayedReminderTask.result, reminderTask.result);
+  const reminderReceipt = await ipcRequest({
+    action: 'get_task_receipt', authorization, params: { taskId: reminderTask.result.task.id },
+  });
+  assert.equal(reminderReceipt.result.reminders[0].state, 'scheduled');
+
+  const pwaStateResponse = await fetch(`${baseUrl}/api/state`);
+  assert.equal(pwaStateResponse.status, 200);
+  const pwaState = await pwaStateResponse.json();
+  const pwaReminderTask = pwaState.messages.find((message) => message.id === reminderTask.result.task.id);
+  assert.deepEqual(pwaReminderTask.discordReminders, [{
+    status: 'scheduled',
+    scheduledForUtc: '2026-08-16T04:45:00.000Z',
+    displayDate: '2026-08-16',
+    displayTime: '00:45',
+    displayTimeZone: 'America/New_York',
+    cancellationReason: null,
+  }]);
+  assert.equal(fs.readFileSync(path.join(dataDirectory, 'db.json'), 'utf8'), persistedBeforeReads);
+  const serializedPwaTask = JSON.stringify(pwaReminderTask);
+  for (const forbidden of ['leaseToken', 'operationId', 'discordWebhook', 'lastFailureCode']) {
+    assert.equal(serializedPwaTask.includes(forbidden), false);
+  }
 
   const found = await ipcRequest({
     action: 'find_tasks', authorization, params: { query: 'dry cleaning' },
@@ -210,6 +269,16 @@ test('PWA completion cancels Gate 3 reminders and reopening does not re-arm them
   });
   const taskId = created.result.task.id;
 
+  const alreadyOpenResponse = await fetch(`${baseUrl}/api/messages/${taskId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ done: false }),
+  });
+  assert.equal(alreadyOpenResponse.status, 200);
+  const alreadyOpenTask = await alreadyOpenResponse.json();
+  assert.equal(alreadyOpenTask.done, false);
+  assert.equal(alreadyOpenTask.discordReminders[0].status, 'scheduled');
+
   const completedResponse = await fetch(`${baseUrl}/api/messages/${taskId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -221,12 +290,15 @@ test('PWA completion cancels Gate 3 reminders and reopening does not re-arm them
   assert.equal(completedTask.done, true);
   assert.equal('result' in completedTask, false);
   assert.equal('receipt' in completedTask, false);
+  assert.equal(completedTask.discordReminders[0].status, 'cancelled');
+  assert.equal(completedTask.discordReminders[0].cancellationReason, 'task_completed');
 
   const cancelledReceipt = await ipcRequest({
     action: 'get_task_receipt', authorization, params: { taskId },
   });
   assert.equal(cancelledReceipt.result.task.completed, true);
   assert.equal(cancelledReceipt.result.reminders[0].state, 'cancelled');
+  assert.equal(cancelledReceipt.result.reminders[0].cancellationReason, 'task_completed');
 
   const reopenedResponse = await fetch(`${baseUrl}/api/messages/${taskId}`, {
     method: 'PATCH',
@@ -237,6 +309,7 @@ test('PWA completion cancels Gate 3 reminders and reopening does not re-arm them
   const reopenedTask = await reopenedResponse.json();
   assert.equal(reopenedTask.id, taskId);
   assert.equal(reopenedTask.done, false);
+  assert.equal(reopenedTask.discordReminders[0].status, 'cancelled');
   const reopenedReceipt = await ipcRequest({
     action: 'get_task_receipt', authorization, params: { taskId },
   });
@@ -296,7 +369,7 @@ test('a second main process cannot replace an active private socket', async () =
   assert.equal(stillAvailable.ok, true);
 });
 
-test('local stdio MCP inspection lists and calls exactly five annotated tools', async () => {
+test('local stdio MCP inspection lists and calls exactly six annotated tools', async () => {
   const sidecar = spawn(process.execPath, ['mcp/sidebrain-mcp.js'], {
     cwd: ROOT,
     env: { ...process.env, SIDEBRAIN_MCP_RUNTIME_DIR: runtimeDirectory },
@@ -324,11 +397,15 @@ test('local stdio MCP inspection lists and calls exactly five annotated tools', 
   });
   assert.equal(initialized.result.protocolVersion, '2025-06-18');
   assert.deepEqual(initialized.result.capabilities, { tools: { listChanged: false } });
+  assert.equal(initialized.result.serverInfo.title, 'Side Brain Tasks');
+  assert.match(initialized.result.instructions, /Sidebrain, also spoken or transcribed as Side Brain or side-brain/);
+  assert.match(initialized.result.instructions, /Use create_task only for ordinary tasks without notifications/);
   sidecar.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
 
   const listed = await rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
   assert.deepEqual(listed.result.tools.map((tool) => tool.name), [
-    'get_upcoming_tasks', 'find_tasks', 'create_task', 'set_task_completion', 'get_task_receipt',
+    'get_upcoming_tasks', 'find_tasks', 'create_task', 'create_reminder_task',
+    'set_task_completion', 'get_task_receipt',
   ]);
   const tools = Object.fromEntries(listed.result.tools.map((tool) => [tool.name, tool]));
   assert.equal(tools.get_upcoming_tasks.annotations.readOnlyHint, true);
@@ -340,18 +417,46 @@ test('local stdio MCP inspection lists and calls exactly five annotated tools', 
   });
   assert.equal(tools.get_task_receipt.annotations.readOnlyHint, true);
   assert.equal(tools.create_task.annotations.readOnlyHint, false);
+  assert.deepEqual(tools.create_reminder_task.annotations, {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  });
   assert.equal(tools.set_task_completion.annotations.readOnlyHint, false);
   assert.equal(tools.create_task.annotations.idempotentHint, true);
+  assert.equal('discordReminders' in tools.create_task.inputSchema.properties, false);
+  assert.deepEqual(Object.keys(tools.create_task.inputSchema.properties.followUp.properties), ['date']);
   assert.equal(tools.set_task_completion.annotations.destructiveHint, true);
   assert.match(tools.create_task.description, /confirm with the user/i);
+  assert.match(tools.create_task.description, /Do not use for reminder, notification, alert, or Discord-delivery requests\. Use create_reminder_task instead\./);
+  assert.match(tools.create_reminder_task.description, /^Use this when the user asks to be reminded, notified, alerted, or sent a Discord reminder\./);
+  assert.match(tools.create_reminder_task.description, /confirm the exact local date, local time, IANA timezone/i);
   assert.match(tools.set_task_completion.description, /confirm the exact task/i);
   assert.match(tools.set_task_completion.description, /first use find_tasks/i);
   assert.match(tools.set_task_completion.description, /ask the user to choose/i);
+  assert.match(tools.set_task_completion.description, /^Use only when the user explicitly asks to mark an existing task completed, done, reopened, or incomplete\./);
+  assert.match(tools.set_task_completion.description, /Never use during task creation or when the user is merely confirming creation\./);
+  assert.match(initialized.result.instructions, /“Yes, create that reminder” continues the creation flow and must never invoke set_task_completion/);
 
   const malformedArguments = await rpc({
     jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'create_task', arguments: [] },
   });
   assert.equal(malformedArguments.error.code, -32602);
+  const misroutedReminder = await rpc({
+    jsonrpc: '2.0', id: 23, method: 'tools/call',
+    params: {
+      name: 'create_task',
+      arguments: {
+        idempotencyKey: 'misrouted-reminder-01',
+        origin: 'chatgpt_voice',
+        title: 'Must use the dedicated tool',
+        discordReminders: [{ date: '2026-08-16', time: '01:00', timeZone: 'America/New_York' }],
+      },
+    },
+  });
+  assert.equal(misroutedReminder.error.code, -32602);
+  assert.match(misroutedReminder.error.message, /create_reminder_task/);
   sidecar.stdin.write('{\n');
   const parseError = await nextResponse();
   assert.equal(parseError.error.code, -32700);
@@ -384,6 +489,25 @@ test('local stdio MCP inspection lists and calls exactly five annotated tools', 
   assert.equal(created.result.structuredContent.durable, true);
   assert.equal(created.result.structuredContent.task.title, 'Water the plants');
   assert.deepEqual(created.result.structuredContent.reminders, []);
+
+  const reminderCreated = await rpc({
+    jsonrpc: '2.0', id: 22, method: 'tools/call',
+    params: {
+      name: 'create_reminder_task',
+      arguments: {
+        idempotency_key: 'mcp-voice-reminder-01',
+        origin: 'chatgpt_voice',
+        title: 'Take a stretch break',
+        reminder_at: '2026-08-16T01:00',
+        timezone: 'America/New_York',
+      },
+    },
+  });
+  assert.equal(reminderCreated.result.isError, undefined);
+  assert.equal(reminderCreated.result.structuredContent.reminders.length, 1);
+  assert.equal(reminderCreated.result.structuredContent.reminders[0].state, 'scheduled');
+  assert.equal(reminderCreated.result.structuredContent.task.due.time, '01:00');
+  assert.deepEqual(reminderCreated.result.structuredContent.task.tags, ['Reminder']);
 
   const taskId = created.result.structuredContent.task.id;
   const found = await rpc({

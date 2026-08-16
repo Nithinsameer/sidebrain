@@ -122,11 +122,12 @@ The ChatGPT integration uses a narrow local MCP sidecar over stdio and private I
 
 ## MCP task sidecar
 
-The local stdio MCP sidecar exposes exactly five task-scoped tools:
+The local stdio MCP sidecar exposes exactly six task-scoped tools:
 
 - `get_upcoming_tasks` returns the Gate 2 bounded, credential-redacted task projection.
 - `find_tasks` finds scheduled or unscheduled tasks by redacted one-line title before completion changes.
-- `create_task` durably creates a task and optional Discord reminders.
+- `create_task` durably creates an ordinary task without notification intent.
+- `create_reminder_task` atomically creates a due task, a reused or new `Reminder` tag, and exactly one Discord reminder.
 - `set_task_completion` completes or reopens a task; completion cancels undelivered reminders by default.
 - `get_task_receipt` verifies a durable operation by operation ID, task ID, or idempotency key.
 
@@ -136,9 +137,15 @@ Every write requires an 8–128 character idempotency key and one of the fixed o
 
 Dates are stored as local calendar dates. A time always requires an explicit IANA timezone; its exact UTC instant and display timezone are both stored. Nonexistent spring-forward times and ambiguous fall-back times are rejected rather than guessed. Date-only tasks remain date-only.
 
-Discord reminder records use `scheduled`, `leased`, `retry_wait`, `delivered`, `dead_letter`, and `cancelled` states. Delivery is marked complete only after Discord accepts the request. Failures retry after 30 seconds, 2 minutes, 10 minutes, 30 minutes, 2 hours, and then every 6 hours within a persisted 24-hour delivery window. On restart, expired leases are reclaimed, reminders beyond that window are dead-lettered, and overdue reminders still within the window are delivered with recorded lateness; an ambiguous timeout can rarely result in a duplicate Discord notification.
+`create_reminder_task` accepts a strict future local `YYYY-MM-DDTHH:MM` plus an IANA timezone, rejects DST gaps and folds, uses that same moment as the task due time, and cannot omit its one Discord reminder. Discord reminder records use `scheduled`, `leased`, `retry_wait`, `delivered`, `dead_letter`, and `cancelled` states. Delivery is marked complete only after Discord accepts the request. Failures retry after 30 seconds, 2 minutes, 10 minutes, 30 minutes, 2 hours, and then every 6 hours within a persisted 24-hour delivery window. On restart, expired leases are reclaimed, reminders beyond that window are dead-lettered, and overdue reminders still within the window are delivered with recorded lateness; an ambiguous timeout can rarely result in a duplicate Discord notification.
 
-The schema migration is additive and automatic: existing `messages`, `tags`, and legacy `reminders` stay intact, while `taskOperations` is initialized when absent and new Discord reminders carry the state-machine fields. Gate 3 records remain hidden from the legacy PWA reminder list to avoid duplicate browser notifications. The task cards and week planner continue to read the existing `task`, `done`, `plannedFor`, and `dueTime` fields. PWA/API completion and reopening already use the centralized service, so they share MCP reminder cancellation behavior. A later PWA change can route its ordinary task creation and other edits through the service and add reminder status UI without a database migration.
+The schema migration is additive and automatic: existing `messages`, `tags`, and legacy `reminders` stay intact, while `taskOperations` is initialized when absent and new Discord reminders carry the state-machine fields. Gate 3 records remain hidden from the legacy PWA reminder list to avoid duplicate browser notifications. Instead, task cards, week cards, and task details receive only safe reminder timing and `scheduled`, `retrying`, `delivered`, `failed`, or `cancelled` indicators; reminder text, leases, webhook data, operation internals, and credentials remain excluded. PWA/API completion and reopening already use the centralized service, so they share MCP reminder cancellation behavior.
+
+Task completion is a deliberate checkbox action in the PWA; clicking task text does not change completion state. Only an actual incomplete-to-completed transition can cancel an active Discord reminder. New cancellations durably record a constrained reason, timestamp, origin, and responsible operation ID; receipts and the PWA expose only the safe reason and never the internal operation reference.
+
+The proposed developer-app display name is **Side Brain Tasks**. Its proposed description is: “Sidebrain, also spoken or transcribed as Side Brain or side-brain, is Sameer’s personal task and Discord reminder system.” The metadata test set covers direct Voice-style prompts using all three spellings and separates reminder intent from ordinary task creation.
+
+The tunnel can be made persistent with `extras/com.sidebrain.tunnel-client.plist`. Install it after replacing `__HOME__` with the absolute user home directory. It starts the existing `sidebrain` profile at login and restarts it after failure. The profile and runtime key remain protected under `~/.config/tunnel-client`; the LaunchAgent contains neither the key nor its value.
 
 Run the stdio sidecar with:
 
