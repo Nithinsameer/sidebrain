@@ -255,8 +255,11 @@ body.compact .masonry .card { margin-bottom: 10px; }
 .linkpreview .lp-host { color: var(--text-faint); font-size: 11px; }
 
 /* to-do list rendering */
-.todo-item { display: flex; align-items: flex-start; gap: 9px; padding: 3px 0; cursor: pointer; }
+.todo-item { display: flex; align-items: flex-start; gap: 9px; padding: 3px 0; }
+.todo-item[data-line] { cursor: pointer; }
 .todo-item .box { flex: none; width: 15px; height: 15px; margin-top: 3px; border: 1.5px solid var(--border-strong); border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; }
+.todo-item .task-toggle { padding: 0; background: transparent; color: inherit; cursor: pointer; }
+.todo-item .task-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .todo-item.done .box { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
 .todo-item.done .label { text-decoration: line-through; color: var(--text-faint); }
 
@@ -333,6 +336,17 @@ body.compact .imggrid img, body.compact .imggrid .filecard { height: 64px; }
   display: inline-flex; align-items: center; gap: 4px;
   font-size: 10.5px; padding: 2px 8px; border-radius: 999px;
   border: 1px dashed var(--border-strong); color: var(--text-faint);
+}
+.remchip { white-space: normal; line-height: 1.35; }
+.rem-scheduled { border-color: color-mix(in srgb, #0ea5e9 55%, var(--border-strong)); color: #0ea5e9; }
+.rem-retrying { border-color: color-mix(in srgb, #f59e0b 60%, var(--border-strong)); color: #f59e0b; }
+.rem-delivered { border-color: color-mix(in srgb, #22c55e 55%, var(--border-strong)); color: #22c55e; }
+.rem-failed { border-color: color-mix(in srgb, #ef4444 60%, var(--border-strong)); color: #ef4444; }
+.rem-cancelled { color: var(--text-faint); text-decoration: line-through; }
+.sheet-reminders { display: grid; gap: 6px; margin: 10px 2px 4px; }
+.reminder-status {
+  border: 1px dashed var(--border-strong); border-radius: 9px;
+  padding: 7px 9px; font-size: 11px; line-height: 1.4;
 }
 .card.task-done .text, .card.task-done .label { color: var(--text-faint); }
 

@@ -15,6 +15,7 @@ const crypto = require('crypto');
 const os = require('os');
 const { writeJsonDurably } = require('./lib/durable-json-store');
 const { createPrivateIpcServer } = require('./lib/private-ipc');
+const { projectMessageForPwa } = require('./lib/reminder-projection');
 const { createTaskService, migrateTaskWriteSchema } = require('./lib/task-service');
 
 const PORT = process.env.PORT || 4780;
@@ -906,6 +907,7 @@ async function handleApi(req, res, pathname) {
     const legacyReminders = db.reminders.filter((reminder) => !(reminder.channel === 'discord' && reminder.state));
     return send(res, 200, {
       ...applicationState,
+      messages: db.messages.map((message) => projectMessageForPwa(db, message)),
       reminders: legacyReminders,
       settings: publicSettings(db.settings),
       meta: { lanUrl: ip ? `http://${ip}:${PORT}` : null },
@@ -983,7 +985,7 @@ async function handleApi(req, res, pathname) {
       if ('plannedFor' in body || 'dueTime' in body) msg.taskNotified = false;
       if ('files' in body) msg.files = materializeFiles(body.files);
       saveDb();
-      return send(res, 200, msg);
+      return send(res, 200, projectMessageForPwa(db, msg));
     }
     if (method === 'DELETE' && id) {
       const msg = db.messages.find((m) => m.id === id);

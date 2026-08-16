@@ -213,6 +213,47 @@ function fmtClock(hm) {
   return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
+function discordReminderMoment(reminder) {
+  if (reminder.displayDate && reminder.displayTime) {
+    return `${fmtDay(reminder.displayDate)} · ${fmtClock(reminder.displayTime)}${reminder.displayTimeZone ? ` (${reminder.displayTimeZone})` : ''}`;
+  }
+  if (reminder.scheduledForUtc) return fmtTime(reminder.scheduledForUtc);
+  return 'unknown time';
+}
+
+function discordReminderLabel(reminder) {
+  const moment = discordReminderMoment(reminder);
+  if (reminder.status === 'retrying') return `Discord reminder retrying · ${moment}`;
+  if (reminder.status === 'delivered') return `Discord reminder delivered · ${moment}`;
+  if (reminder.status === 'failed') return `Discord reminder failed · ${moment}`;
+  if (reminder.status === 'cancelled') {
+    const reasons = {
+      task_completed: 'task was completed',
+      task_deleted: 'task was deleted',
+      task_rescheduled: 'task was rescheduled',
+      explicit_user_cancellation: 'cancelled by request',
+      expired_before_delivery: 'delivery window expired',
+      administrative: 'administratively cancelled',
+    };
+    const reason = reasons[reminder.cancellationReason];
+    return `Discord reminder cancelled${reason ? ` (${reason})` : ''} · ${moment}`;
+  }
+  return `Discord reminder scheduled for ${moment}`;
+}
+
+function discordReminderChips(m) {
+  return (m.discordReminders || []).map((reminder) =>
+    `<span class="duechip remchip rem-${esc(reminder.status)}">${esc(discordReminderLabel(reminder))}</span>`).join('');
+}
+
+function discordReminderDetails(m) {
+  if (!(m.discordReminders || []).length) return '';
+  return `<div class="sheet-reminders">
+    ${(m.discordReminders || []).map((reminder) =>
+      `<div class="reminder-status rem-${esc(reminder.status)}">${esc(discordReminderLabel(reminder))}</div>`).join('')}
+  </div>`;
+}
+
 // ---------------------------------------------------------------- card html
 
 const linkTitleCache = new Map(JSON.parse(localStorage.getItem('mc_link_titles') || '[]'));
@@ -230,7 +271,7 @@ function cardHtml(m, { compactActions = false, draggable = false } = {}) {
       return `<div class="todo-item ${done ? 'done' : ''}" data-line="${i}"><span class="box">${done ? '✓' : ''}</span><span class="label">${richText(line)}</span></div>`;
     }).join('');
   } else if (m.task) {
-    body = `<div class="todo-item ${m.done ? 'done' : ''}" data-taskdone><span class="box">${m.done ? '✓' : ''}</span><span class="label">${richText(m.text)}</span></div>`;
+    body = `<div class="todo-item task-row ${m.done ? 'done' : ''}"><button type="button" class="box task-toggle" data-taskdone aria-label="${m.done ? 'Reopen task' : 'Mark task complete'}">${m.done ? '✓' : ''}</button><span class="label">${richText(m.text)}</span></div>`;
   } else {
     body = `<div class="text">${richText(m.text)}</div>`;
   }
@@ -276,6 +317,7 @@ function cardHtml(m, { compactActions = false, draggable = false } = {}) {
     <div class="meta">
       ${tags.map(tagPill).join('')}
       ${m.plannedFor ? `<span class="duechip">Due ${fmtDay(m.plannedFor)}${m.dueTime ? ' · ' + fmtClock(m.dueTime) : ''}</span>` : ''}
+      ${discordReminderChips(m)}
       ${m.parentId || S.messages.some((x) => x.parentId === m.id && !x.deletedAt) ? `<button class="duechip linchip" data-lineage title="View lineage">🔗</button>` : ''}
       ${(m.similarTo || []).filter((sid) => S.messages.some((x) => x.id === sid && !x.deletedAt)).length ? `<button class="duechip dejachip" data-dejavu title="You've had this thought before">🌀 ×${m.similarTo.length}</button>` : ''}
       <span class="time">${fmtTime(m.createdAt)}</span>
@@ -357,6 +399,7 @@ function clearFilters() {
 }
 
 // card action dispatch (event delegation on document)
+const taskCompletionPending = new Set();
 document.addEventListener('click', async (e) => {
   const card = e.target.closest('.card[data-id], .canvas-card[data-id]');
   const moreBtn = e.target.closest('[data-more]');
@@ -372,17 +415,36 @@ document.addEventListener('click', async (e) => {
     await handleCardAction(actBtn.dataset.act, card.dataset.id);
     return;
   }
-  // to-do line toggle
-  const todo = e.target.closest('.todo-item');
+  // Task completion is intentionally limited to the checkbox. Clicking task
+  // text must never complete it while the user is inspecting a new reminder.
+  const taskToggle = e.target.closest('[data-taskdone]');
+  if (taskToggle && card) {
+    const m = S.messages.find((x) => x.id === card.dataset.id);
+    if (!m) return;
+    if (taskCompletionPending.has(m.id)) return;
+    const previous = m.done;
+    taskCompletionPending.add(m.id);
+    m.done = !m.done;
+    renderCurrentView();
+    try {
+      const updated = await api('PATCH', 'messages/' + m.id, { done: m.done });
+      m.done = !!updated.done;
+      m.completedAt = updated.completedAt || null;
+      m.discordReminders = updated.discordReminders || [];
+    } catch {
+      m.done = previous;
+      toast('Failed to save');
+    } finally {
+      taskCompletionPending.delete(m.id);
+      renderCurrentView();
+    }
+    return;
+  }
+  // Checklist lines retain whole-row toggling.
+  const todo = e.target.closest('.todo-item[data-line]');
   if (todo && card && !e.target.closest('a')) {
     const m = S.messages.find((x) => x.id === card.dataset.id);
     if (!m) return;
-    if (todo.hasAttribute('data-taskdone')) {
-      m.done = !m.done;
-      renderCurrentView();
-      api('PATCH', 'messages/' + m.id, { done: m.done }).catch(() => toast('Failed to save'));
-      return;
-    }
     const line = +todo.dataset.line;
     const set = new Set(m.checked || []);
     set.has(line) ? set.delete(line) : set.add(line);
@@ -757,6 +819,7 @@ function openCardSheet(m) {
       <input type="time" id="sheetDueTime" value="${m.dueTime || ''}" title="Optional time — you get a push at this moment" />
       ${m.plannedFor || m.dueTime ? '<button class="btn" id="sheetDueClear">Clear</button>' : ''}
     </div>
+    ${discordReminderDetails(m)}
     <p class="sub" style="margin:6px 2px 0">Date puts it in that day's plan + morning digest; add a time to also get a push at that exact moment.</p>
     <div class="sheet-rows">
       <button data-s="pin"><span class="ic">📌</span>${m.pinned ? 'Unpin from top' : 'Pin to top'}</button>
@@ -1531,15 +1594,16 @@ function weekCardHtml(m) {
       return `<div class="todo-item ${done ? 'done' : ''}" data-line="${i}"><span class="box">${done ? '✓' : ''}</span><span class="label">${richText(line)}</span></div>`;
     }).join('');
   } else {
-    body = `<div class="todo-item ${m.done ? 'done' : ''}" data-taskdone><span class="box">${m.done ? '✓' : ''}</span><span class="label">${richText(m.text)}</span></div>`;
+    body = `<div class="todo-item task-row ${m.done ? 'done' : ''}"><button type="button" class="box task-toggle" data-taskdone aria-label="${m.done ? 'Reopen task' : 'Mark task complete'}">${m.done ? '✓' : ''}</button><span class="label">${richText(m.text)}</span></div>`;
   }
   return `<div class="week-card card" draggable="true" data-id="${m.id}" style="padding:8px 10px;margin:0">
     <button class="wdel" title="Delete">✕</button>
     <button class="more" data-more title="Options">⋯</button>
     ${body}
-    ${m.dueTime || tags.length ? `<div class="meta">
+    ${m.dueTime || tags.length || (m.discordReminders || []).length ? `<div class="meta">
       ${m.dueTime ? `<span class="duechip">${fmtClock(m.dueTime)}</span>` : ''}
       ${tags.map(tagPill).join('')}
+      ${discordReminderChips(m)}
     </div>` : ''}
   </div>`;
 }

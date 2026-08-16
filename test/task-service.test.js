@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { writeJsonDurably } = require('../lib/durable-json-store');
+const { projectMessageForPwa } = require('../lib/reminder-projection');
 const {
   createTaskService,
   DELIVERY_WINDOW_MS,
@@ -70,6 +71,129 @@ test('simple voice-style creation is durable without invented fields', (t) => {
   assert.deepEqual(saved.messages[0].sources, []);
   assert.deepEqual(saved.messages[0].checklist, []);
   assert.equal(saved.taskOperations.length, 1);
+});
+
+test('dedicated reminder creation requires a reminder and schedules exactly one durably', (t) => {
+  const h = harness(t);
+  assert.throws(() => h.service.createReminderTask({
+    idempotency_key: 'missing-reminder-01',
+    origin: 'chatgpt_voice',
+    title: 'Missing reminder',
+    timezone: 'America/New_York',
+  }), /reminder_at is required/);
+
+  const receipt = h.service.createReminderTask({
+    idempotency_key: 'voice-reminder-0001',
+    origin: 'chatgpt_voice',
+    title: 'Check the oven',
+    reminder_at: '2026-08-16T09:15',
+    timezone: 'America/New_York',
+  });
+
+  assert.equal(receipt.operationType, 'create_reminder_task');
+  assert.deepEqual(receipt.task.due, {
+    date: '2026-08-16',
+    time: '09:15',
+    timeZone: 'America/New_York',
+    atUtc: '2026-08-16T13:15:00.000Z',
+  });
+  assert.deepEqual(receipt.task.tags, ['Reminder']);
+  assert.equal(receipt.reminders.length, 1);
+  assert.equal(receipt.reminders[0].state, 'scheduled');
+  assert.equal(receipt.reminders[0].scheduledForUtc, '2026-08-16T13:15:00.000Z');
+  assert.equal(receipt.reminders[0].expiresAtUtc, '2026-08-17T13:15:00.000Z');
+
+  const saved = JSON.parse(fs.readFileSync(h.file, 'utf8'));
+  assert.equal(saved.messages.length, 1);
+  assert.equal(saved.reminders.length, 1);
+  assert.equal(saved.taskOperations.length, 1);
+  assert.equal(saved.taskOperations[0].type, 'create_reminder_task');
+});
+
+test('Reminder tag is reused and dedicated reminder writes are idempotent', (t) => {
+  const h = harness(t);
+  h.database.tags.push({
+    id: 'existing-reminder-tag', name: 'Reminder', color: 'amber', keywords: [], parent: null,
+  });
+  const request = {
+    idempotency_key: 'reminder-idempotent-01',
+    origin: 'chatgpt_voice',
+    title: 'Leave for practice',
+    reminder_at: '2026-08-16T10:00',
+    timezone: 'America/New_York',
+  };
+  const first = h.service.createReminderTask(request);
+  const repeated = h.service.createReminderTask({ ...request });
+  assert.deepEqual(repeated, first);
+  assert.deepEqual(first.task.tags, ['Reminder']);
+  assert.equal(h.database.tags.filter((tag) => tag.name.toLowerCase() === 'reminder').length, 1);
+  assert.equal(h.database.messages.length, 1);
+  assert.equal(h.database.reminders.length, 1);
+  assert.equal(h.database.taskOperations.length, 1);
+  h.service.setTaskCompletion({
+    idempotencyKey: 'reminder-complete-01',
+    origin: 'chatgpt',
+    taskId: first.task.id,
+    completed: true,
+  });
+  const byTaskId = h.service.getTaskReceipt({ taskId: first.task.id });
+  assert.equal(byTaskId.operationType, 'create_reminder_task');
+  assert.equal(byTaskId.reminders[0].state, 'cancelled');
+  assert.throws(() => h.service.createReminderTask({ ...request, title: 'Changed title' }), (error) => {
+    assert.equal(error.code, 'idempotency_conflict');
+    return true;
+  });
+});
+
+test('dedicated reminder survives receipt, replay, PWA projection, and its scheduled delivery attempt', async (t) => {
+  let deliveries = 0;
+  const h = harness(t, {
+    deliverDiscord: async () => { deliveries += 1; return { ok: true }; },
+  });
+  const request = {
+    idempotency_key: 'reminder-lifecycle-01',
+    origin: 'chatgpt_voice',
+    title: 'Lifecycle reminder',
+    reminder_at: '2026-08-16T09:15',
+    timezone: 'America/New_York',
+  };
+  const created = h.service.createReminderTask(request);
+  const persistedBeforeReads = fs.readFileSync(h.file, 'utf8');
+
+  assert.equal(h.service.getTaskReceipt({ taskId: created.task.id }).reminders[0].state, 'scheduled');
+  assert.deepEqual(h.service.createReminderTask({ ...request }), created);
+  const pwaTask = projectMessageForPwa(h.database, h.database.messages[0]);
+  assert.equal(pwaTask.discordReminders[0].status, 'scheduled');
+  assert.equal(fs.readFileSync(h.file, 'utf8'), persistedBeforeReads);
+
+  h.setTime('2026-08-16T13:15:00.000Z');
+  const delivery = await h.service.runReminderCycle();
+  assert.equal(delivery.delivered, 1);
+  assert.equal(deliveries, 1);
+  assert.equal(h.database.reminders[0].state, 'delivered');
+  assert.equal(h.database.reminders[0].attempts, 1);
+  assert.equal(h.database.reminders[0].cancellationReason, null);
+});
+
+test('dedicated reminder creation rejects past, invalid-zone, DST-gap, and DST-fold moments', (t) => {
+  const h = harness(t);
+  const base = { origin: 'chatgpt_voice', title: 'Invalid reminder' };
+  assert.throws(() => h.service.createReminderTask({
+    ...base, idempotency_key: 'past-reminder-0001',
+    reminder_at: '2026-08-16T07:59', timezone: 'America/New_York',
+  }), /must be in the future/);
+  assert.throws(() => h.service.createReminderTask({
+    ...base, idempotency_key: 'zone-reminder-0001',
+    reminder_at: '2026-08-17T09:00', timezone: 'Not\/A_Zone',
+  }), /valid IANA timezone/);
+  assert.throws(() => h.service.createReminderTask({
+    ...base, idempotency_key: 'gap-reminder-00001',
+    reminder_at: '2027-03-14T02:30', timezone: 'America/New_York',
+  }), /does not exist/);
+  assert.throws(() => h.service.createReminderTask({
+    ...base, idempotency_key: 'fold-reminder-0001',
+    reminder_at: '2026-11-01T01:30', timezone: 'America/New_York',
+  }), /ambiguous/);
 });
 
 test('additive migration preserves legacy tasks and reminders', (t) => {
@@ -303,6 +427,16 @@ test('completion cancels undelivered reminders and reopening does not re-arm the
     idempotencyKey: 'complete-create-01', origin: 'chatgpt_voice', title: 'Submit form',
     discordReminders: [{ date: '2026-08-20', time: '09:00', timeZone: 'America/New_York' }],
   });
+  const noOpReopen = h.service.setTaskCompletion({
+    idempotencyKey: 'open-noop-change-01', origin: 'pwa',
+    taskId: created.task.id, completed: false,
+  });
+  assert.equal(noOpReopen.task.completed, false);
+  assert.equal(noOpReopen.reminders[0].state, 'scheduled');
+  assert.equal(h.database.messages[0].reopenedAt, undefined);
+  assert.equal(h.database.taskOperations.at(-1).statusChanged, false);
+  assert.equal(h.database.taskOperations.at(-1).cancelledReminderCount, 0);
+
   const completionRequest = {
     idempotencyKey: 'complete-change-01', origin: 'chatgpt_voice',
     taskId: created.task.id, completed: true,
@@ -310,6 +444,16 @@ test('completion cancels undelivered reminders and reopening does not re-arm the
   const completed = h.service.setTaskCompletion(completionRequest);
   assert.equal(completed.task.completed, true);
   assert.equal(completed.reminders[0].state, 'cancelled');
+  assert.equal(completed.reminders[0].cancellationReason, 'task_completed');
+  const cancellation = h.database.reminders[0];
+  const completionOperation = h.database.taskOperations.at(-1);
+  assert.equal(cancellation.cancelledByOperationId, completed.operationId);
+  assert.equal(cancellation.cancellationOrigin, 'chatgpt_voice');
+  assert.equal(completionOperation.requestedCompleted, true);
+  assert.equal(completionOperation.resultingCompleted, true);
+  assert.equal(completionOperation.statusChanged, true);
+  assert.equal(completionOperation.cancelPendingRemindersRequested, true);
+  assert.equal(completionOperation.cancelledReminderCount, 1);
   assert.deepEqual(h.service.setTaskCompletion({ ...completionRequest }), completed);
   assert.throws(() => h.service.setTaskCompletion({ ...completionRequest, completed: false }), (error) => {
     assert.equal(error.code, 'idempotency_conflict');
@@ -322,6 +466,9 @@ test('completion cancels undelivered reminders and reopening does not re-arm the
   });
   assert.equal(reopened.task.completed, false);
   assert.equal(reopened.reminders[0].state, 'cancelled');
+  assert.equal(reopened.reminders[0].cancellationReason, 'task_completed');
+  assert.equal(h.database.reminders[0].cancelledByOperationId, completed.operationId);
+  assert.equal(h.database.taskOperations.at(-1).cancelledReminderCount, 0);
 });
 
 test('receipts exclude credentials, stored bodies, settings, and source URLs', (t) => {

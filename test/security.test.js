@@ -57,6 +57,7 @@ function testDatabase() {
       checked: [],
       task: false,
       done: false,
+      operationId: 'internal-message-operation-27d41c',
       plannedFor: null,
       dueTime: null,
       taskNotified: false,
@@ -71,11 +72,16 @@ function testDatabase() {
       createdAt: '2026-01-01T12:00:00.000Z',
     }, {
       id: 'internal-discord-reminder',
+      taskId: 'existing-note',
       text: 'Internal Discord reminder',
       due: '2099-01-02T12:00:00.000Z',
       scheduledForUtc: '2099-01-02T12:00:00.000Z',
+      displayDate: '2099-01-02',
+      displayTime: '07:00',
+      displayTimeZone: 'America/New_York',
       channel: 'discord',
       state: 'scheduled',
+      attempts: 0,
       leaseToken: 'internal-lease-secret-96c1',
       done: false,
     }],
@@ -146,6 +152,15 @@ test('GET /api/state preserves application data while redacting secret settings'
 
   assert.equal(state.settings.theme, 'dark');
   assert.equal(state.messages[0].id, 'existing-note');
+  assert.equal('operationId' in state.messages[0], false);
+  assert.deepEqual(state.messages[0].discordReminders, [{
+    status: 'scheduled',
+    scheduledForUtc: '2099-01-02T12:00:00.000Z',
+    displayDate: '2099-01-02',
+    displayTime: '07:00',
+    displayTimeZone: 'America/New_York',
+    cancellationReason: null,
+  }]);
   assert.equal(state.reminders[0].id, 'existing-reminder');
   assert.equal(state.reminders.length, 1);
   assert.equal(state.habits['2026-01-01'].gym, true);
@@ -153,6 +168,8 @@ test('GET /api/state preserves application data while redacting secret settings'
   assert.equal('taskOperations' in state, false);
   assert.equal(serialized.includes('internal-lease-secret-96c1'), false);
   assert.equal(serialized.includes('internal-idempotency-secret-402d'), false);
+  assert.equal(serialized.includes('Internal Discord reminder'), false);
+  assert.equal(serialized.includes('internal-message-operation-27d41c'), false);
 
   for (const [key, value] of Object.entries(SECRET_VALUES)) {
     assert.equal(key in state.settings, false, `${key} must not be returned`);
