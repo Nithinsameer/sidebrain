@@ -114,10 +114,10 @@ test('control verification polls through a stale first state without resending a
       control: async (_device, capability) => { controls.push(capability); return true; },
       getState: async () => {
         stateReads += 1;
-        return [{
-          type: 'devices.capabilities.range', instance: 'brightness',
-          state: { value: stateReads === 1 ? 42 : 55 },
-        }];
+        return [
+          { type: 'devices.capabilities.online', instance: 'online', state: { value: true } },
+          { type: 'devices.capabilities.range', instance: 'brightness', state: { value: stateReads < 3 ? 42 : 55 } },
+        ];
       },
     },
     sleep: async () => { sleeps += 1; },
@@ -128,11 +128,23 @@ test('control verification polls through a stale first state without resending a
   const result = await service.controlLights({ target: [lightId(device)], settings: { brightness: 55 } });
 
   assert.equal(controls.length, 1);
-  assert.equal(stateReads, 2);
+  assert.equal(stateReads, 3);
   assert.equal(sleeps, 1);
   assert.deepEqual(result.results.map(({ apiAccepted, stateConfirmed, confirmationAttempts }) => ({ apiAccepted, stateConfirmed, confirmationAttempts })), [
     { apiAccepted: true, stateConfirmed: true, confirmationAttempts: 2 },
   ]);
+});
+
+test('batch controls skip an offline bulb and continue reachable bulbs without sending to the offline device', async () => {
+  const { service, client, controls, devices } = harness();
+  client.getState = async (device) => [
+    { type: 'devices.capabilities.online', instance: 'online', state: { value: device.deviceName !== 'Desk' } },
+    { type: 'devices.capabilities.on_off', instance: 'powerSwitch', state: { value: 0 } },
+  ];
+  const result = await service.controlLights({ target: 'all', settings: { power: false } });
+  assert.equal(controls.some((entry) => entry.device === 'Desk'), false);
+  assert.deepEqual(new Set(controls.map((entry) => entry.device)), new Set(devices.slice(1).map((item) => item.deviceName)));
+  assert.equal(result.results.find((entry) => entry.light.name === 'Desk').skipped, 'offline');
 });
 
 test('dynamic scene safeguards require confirmation only for disruptive names', async () => {

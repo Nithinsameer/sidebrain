@@ -110,7 +110,7 @@ Your Mac must be awake to serve requests — in System Settings → Battery, ena
 
 ## Security boundary
 
-Sidebrain currently assumes a trusted personal environment: the Mac, its current LAN, and its private Tailscale network. Most legacy HTTP routes are not authenticated, and legacy service credentials remain in plaintext in `data/db.json` and historical backups. The capture and voice-command routes require a bearer token. The Govee key is a stricter exception: it lives only in a protected local file outside `data/` and is never returned or logged.
+Sidebrain currently assumes a trusted personal environment: the Mac, its current LAN, and its private Tailscale network. Most legacy HTTP routes are not authenticated, and legacy service credentials remain in plaintext in `data/db.json` and historical backups. The capture and voice-command routes require separate bearer credentials. The voice and Govee credentials live only in protected local files outside `data/` and are never returned or logged.
 
 - Do not configure Tailscale Funnel, forward port 4780 from a router, or otherwise publish Sidebrain to the internet.
 - Do not share the tailnet with untrusted users or use Sidebrain on an untrusted LAN without revisiting authentication and transport security.
@@ -159,8 +159,8 @@ npm run mcp:stdio
 
 The same **Side Brain Tasks** MCP app also provides narrow official-Govee lighting, durable `codex`-tag delegation, and authenticated Apple Shortcut commands. Govee devices, ranges, scenes, DIY scenes, and snapshots are discovered from the API rather than assumed. The Govee credential lives only in a protected local file, never `data/db.json`.
 
-Codex delegation uses `ready`, `claimed`, `running`, `waiting`, `completed`, `failed`, and `cancelled` states with one global active lease, hashed claim tokens, recovery for expired claims, a server-side `mindchuck` project alias, child-note results, and durable safe Discord notifications. The reviewed Local-mode 15-minute schedule is not created or enabled automatically.
+Codex delegation uses `ready`, `claimed`, `running`, `waiting`, `completed`, `failed`, and `cancelled` states with one global active lease, hashed claim tokens, recovery for expired claims, a server-side `mindchuck` project alias, child-note results, and durable safe Discord notifications. The reviewed Local-mode schedule runs once daily at 8:30 AM America/New_York and is enabled only after a manual delegation succeeds.
 
-The `POST /api/voice-command` endpoint uses the existing Shortcut bearer token and returns concise JSON text for **Speak Text**. It supports upcoming tasks, task/reminder creation, unambiguous completion, lights, discovered scenes, named presets, and delegation status.
+The `POST /api/voice-command` endpoint uses a dedicated protected Shortcut credential and returns concise structured JSON for **Speak Text**. The existing AI configuration classifies natural speech into a strict allowlist; Sidebrain validates every argument and executes only narrow task, reminder, Govee, and delegation adapters. Consequential or ambiguous operations use a short-lived, single-use second spoken confirmation turn.
 
 See [docs/SIDEBRAIN_HOME_AGENT.md](docs/SIDEBRAIN_HOME_AGENT.md) for setup, schemas, the **Side Brain** Shortcut, exact verification, deployment, and rollback. See [automation/sidebrain-codex-agent.md](automation/sidebrain-codex-agent.md) for the prepared but disabled scheduled-task specification.

@@ -19,6 +19,7 @@ const SECRET_VALUES = {
   telegramToken: 'test-telegram-token-b7dc3f15',
   telegramChatId: 'test-telegram-chat-58310',
 };
+const VOICE_CREDENTIAL = 'test-voice-credential-728e1df64c';
 
 let serverProcess;
 let temporaryDataDirectory;
@@ -120,6 +121,7 @@ test.before(async () => {
     path.join(temporaryDataDirectory, 'db.json'),
     JSON.stringify(testDatabase(), null, 2),
   );
+  fs.writeFileSync(path.join(temporaryDataDirectory, 'voice-command-token'), `${VOICE_CREDENTIAL}\n`, { mode: 0o600 });
 
   serverProcess = spawn(process.execPath, ['server.js'], {
     cwd: ROOT,
@@ -129,6 +131,7 @@ test.before(async () => {
       SIDEBRAIN_DATA_DIR: temporaryDataDirectory,
       SIDEBRAIN_LISTEN_HOST: '127.0.0.1',
       SIDEBRAIN_MCP_RUNTIME_DIR: temporaryMcpRuntimeDirectory,
+      SIDEBRAIN_VOICE_CREDENTIAL_FILE: path.join(temporaryDataDirectory, 'voice-command-token'),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -238,12 +241,27 @@ test('voice-command endpoint rejects URL credentials and performs only authentic
   });
   assert.equal(unauthorized.status, 401);
 
-  const authorized = await fetch(`${baseUrl}/api/voice-command`, {
+  const captureCredential = await fetch(`${baseUrl}/api/voice-command`, {
     method: 'POST', headers: { Authorization: `Bearer ${SECRET_VALUES.captureToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: 'Create task wrong credential' }),
+  });
+  assert.equal(captureCredential.status, 401);
+
+  const authorized = await fetch(`${baseUrl}/api/voice-command`, {
+    method: 'POST', headers: { Authorization: `Bearer ${VOICE_CREDENTIAL}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ text: 'Create task authenticated voice command' }),
   });
   assert.equal(authorized.status, 200);
   assert.match((await authorized.json()).text, /Created task/);
+
+  const malformed = await fetch(`${baseUrl}/api/voice-command`, {
+    method: 'POST', headers: { Authorization: `Bearer ${VOICE_CREDENTIAL}`, 'Content-Type': 'application/json' }, body: '{not json',
+  });
+  assert.equal(malformed.status, 400);
+  assert.deepEqual(await malformed.json(), {
+    ok: false, status: 'error', text: 'The voice request was malformed.',
+    spokenResponse: 'The voice request was malformed.', errorCode: 'malformed_request',
+  });
 });
 
 test('settings endpoint refuses to persist Govee credentials in db.json', async () => {
@@ -260,5 +278,6 @@ test('startup logs do not contain configured credentials', () => {
   for (const [key, value] of Object.entries(SECRET_VALUES)) {
     assert.equal(serverOutput.includes(value), false, `${key} must not occur in startup logs`);
   }
+  assert.equal(serverOutput.includes(VOICE_CREDENTIAL), false);
   assert.match(serverOutput, /voice capture: Bearer token required/);
 });

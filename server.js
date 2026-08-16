@@ -21,6 +21,8 @@ const { createGoveeClient } = require('./lib/govee-client');
 const { createHomeService, migrateHomeSchema } = require('./lib/home-service');
 const { createDelegationService, migrateDelegationSchema } = require('./lib/delegation-service');
 const { createVoiceCommandService } = require('./lib/voice-command-service');
+const { createVoiceIntentClassifier } = require('./lib/voice-intent-classifier');
+const { readVoiceCredential } = require('./lib/protected-credential');
 
 const PORT = process.env.PORT || 4780;
 const LISTEN_HOST = process.env.SIDEBRAIN_LISTEN_HOST || undefined;
@@ -959,8 +961,14 @@ async function handleApi(req, res, pathname) {
     if (voiceUrl.searchParams.has('token')) {
       return send(res, 400, { error: 'voice token must be sent in the Authorization header' });
     }
-    if (!bearerAuthorized(req, db.settings.captureToken)) return send(res, 401, { error: 'invalid voice token' });
-    const result = await voiceCommandService.execute(await readBody(req));
+    let credential;
+    try { credential = readVoiceCredential(); }
+    catch { return send(res, 503, { error: 'voice access is not configured' }); }
+    if (!bearerAuthorized(req, credential)) return send(res, 401, { error: 'voice authentication failed' });
+    let body;
+    try { body = await readBody(req, 16 * 1024); }
+    catch { return send(res, 400, { ok: false, status: 'error', text: 'The voice request was malformed.', spokenResponse: 'The voice request was malformed.', errorCode: 'malformed_request' }); }
+    const result = await voiceCommandService.execute(body);
     return send(res, 200, result);
   }
 
@@ -1331,6 +1339,7 @@ const voiceCommandService = createVoiceCommandService({
   taskService,
   homeService,
   delegationService,
+  classifyIntent: createVoiceIntentClassifier({ configProvider: aiConfig }),
   now: ipcNow,
 });
 const privateIpc = createPrivateIpcServer({
