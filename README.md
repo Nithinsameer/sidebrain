@@ -110,7 +110,7 @@ Your Mac must be awake to serve requests — in System Settings → Battery, ena
 
 ## Security boundary
 
-Sidebrain currently assumes a trusted personal environment: the Mac, its current LAN, and its private Tailscale network. The HTTP API is not authenticated, and service credentials remain in plaintext in `data/db.json`, historical backups, and local logs. Those are accepted constraints for personal use on these trusted networks.
+Sidebrain currently assumes a trusted personal environment: the Mac, its current LAN, and its private Tailscale network. Most legacy HTTP routes are not authenticated, and legacy service credentials remain in plaintext in `data/db.json` and historical backups. The capture and voice-command routes require a bearer token. The Govee key is a stricter exception: it lives only in a protected local file outside `data/` and is never returned or logged.
 
 - Do not configure Tailscale Funnel, forward port 4780 from a router, or otherwise publish Sidebrain to the internet.
 - Do not share the tailnet with untrusted users or use Sidebrain on an untrusted LAN without revisiting authentication and transport security.
@@ -122,7 +122,7 @@ The ChatGPT integration uses a narrow local MCP sidecar over stdio and private I
 
 ## MCP task sidecar
 
-The local stdio MCP sidecar exposes exactly six task-scoped tools:
+The local stdio MCP sidecar retains its six task-scoped tools:
 
 - `get_upcoming_tasks` returns the Gate 2 bounded, credential-redacted task projection.
 - `find_tasks` finds scheduled or unscheduled tasks by redacted one-line title before completion changes.
@@ -143,7 +143,7 @@ The schema migration is additive and automatic: existing `messages`, `tags`, and
 
 Task completion is a deliberate checkbox action in the PWA; clicking task text does not change completion state. Only an actual incomplete-to-completed transition can cancel an active Discord reminder. New cancellations durably record a constrained reason, timestamp, origin, and responsible operation ID; receipts and the PWA expose only the safe reason and never the internal operation reference.
 
-The proposed developer-app display name is **Side Brain Tasks**. Its proposed description is: “Sidebrain, also spoken or transcribed as Side Brain or side-brain, is Sameer’s personal task and Discord reminder system.” The metadata test set covers direct Voice-style prompts using all three spellings and separates reminder intent from ordinary task creation.
+The developer-app display name remains **Side Brain Tasks**. Its description now covers Sameer's task, Discord reminder, Govee lighting, and Codex delegation system. The metadata test set covers direct Voice-style prompts using all three spellings and separates reminder intent from ordinary task creation.
 
 The tunnel can be made persistent with `extras/com.sidebrain.tunnel-client.plist`. Install it after replacing `__HOME__` with the absolute user home directory. It starts the existing `sidebrain` profile at login and restarts it after failure. The profile and runtime key remain protected under `~/.config/tunnel-client`; the LaunchAgent contains neither the key nor its value.
 
@@ -154,3 +154,13 @@ npm run mcp:stdio
 ```
 
 `get_upcoming_tasks` requires an IANA `timeZone` and accepts a 1–31 day window (default 7). It returns open scheduled tasks through that local-date window, including overdue tasks, with at most 100 results. Receipts expose only safe task metadata and reminder states; they never return settings, credentials, uploads, stored details, researched brief bodies, source URLs, or unrelated database state. There are no generic database, settings, file, URL-fetch, update, delete, shell, or arbitrary notification-channel tools.
+
+## Home Agent milestone
+
+The same **Side Brain Tasks** MCP app also provides narrow official-Govee lighting, durable `codex`-tag delegation, and authenticated Apple Shortcut commands. Govee devices, ranges, scenes, DIY scenes, and snapshots are discovered from the API rather than assumed. The Govee credential lives only in a protected local file, never `data/db.json`.
+
+Codex delegation uses `ready`, `claimed`, `running`, `waiting`, `completed`, `failed`, and `cancelled` states with one global active lease, hashed claim tokens, recovery for expired claims, a server-side `mindchuck` project alias, child-note results, and durable safe Discord notifications. The reviewed Local-mode 15-minute schedule is not created or enabled automatically.
+
+The `POST /api/voice-command` endpoint uses the existing Shortcut bearer token and returns concise JSON text for **Speak Text**. It supports upcoming tasks, task/reminder creation, unambiguous completion, lights, discovered scenes, named presets, and delegation status.
+
+See [docs/SIDEBRAIN_HOME_AGENT.md](docs/SIDEBRAIN_HOME_AGENT.md) for setup, schemas, the **Side Brain** Shortcut, exact verification, deployment, and rollback. See [automation/sidebrain-codex-agent.md](automation/sidebrain-codex-agent.md) for the prepared but disabled scheduled-task specification.

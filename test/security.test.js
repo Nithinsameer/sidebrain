@@ -225,6 +225,37 @@ test('capture rejects query credentials and accepts the Authorization header', a
   assert.equal((await headerResponse.json()).text, 'header credential succeeds');
 });
 
+test('voice-command endpoint rejects URL credentials and performs only authenticated narrow commands', async () => {
+  const queryResponse = await fetch(`${baseUrl}/api/voice-command?token=${encodeURIComponent(SECRET_VALUES.captureToken)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'What is coming up?' }),
+  });
+  assert.equal(queryResponse.status, 400);
+  assert.deepEqual(await queryResponse.json(), { error: 'voice token must be sent in the Authorization header' });
+
+  const unauthorized = await fetch(`${baseUrl}/api/voice-command`, {
+    method: 'POST', headers: { Authorization: 'Bearer wrong', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: 'Create task unauthorized write' }),
+  });
+  assert.equal(unauthorized.status, 401);
+
+  const authorized = await fetch(`${baseUrl}/api/voice-command`, {
+    method: 'POST', headers: { Authorization: `Bearer ${SECRET_VALUES.captureToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: 'Create task authenticated voice command' }),
+  });
+  assert.equal(authorized.status, 200);
+  assert.match((await authorized.json()).text, /Created task/);
+});
+
+test('settings endpoint refuses to persist Govee credentials in db.json', async () => {
+  const response = await fetch(`${baseUrl}/api/settings`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ goveeApiKey: 'must-never-be-stored' }),
+  });
+  assert.equal(response.status, 400);
+  const persisted = fs.readFileSync(path.join(temporaryDataDirectory, 'db.json'), 'utf8');
+  assert.equal(persisted.includes('must-never-be-stored'), false);
+});
+
 test('startup logs do not contain configured credentials', () => {
   for (const [key, value] of Object.entries(SECRET_VALUES)) {
     assert.equal(serverOutput.includes(value), false, `${key} must not occur in startup logs`);

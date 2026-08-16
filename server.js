@@ -17,6 +17,10 @@ const { writeJsonDurably } = require('./lib/durable-json-store');
 const { createPrivateIpcServer } = require('./lib/private-ipc');
 const { projectMessageForPwa } = require('./lib/reminder-projection');
 const { createTaskService, migrateTaskWriteSchema } = require('./lib/task-service');
+const { createGoveeClient } = require('./lib/govee-client');
+const { createHomeService, migrateHomeSchema } = require('./lib/home-service');
+const { createDelegationService, migrateDelegationSchema } = require('./lib/delegation-service');
+const { createVoiceCommandService } = require('./lib/voice-command-service');
 
 const PORT = process.env.PORT || 4780;
 const LISTEN_HOST = process.env.SIDEBRAIN_LISTEN_HOST || undefined;
@@ -54,6 +58,8 @@ const DEFAULT_DB = {
   messages: [],   // {id, text, createdAt, pinned, tagIds[], files[], list, checked[], canvas:{on,x,y}}
   reminders: [],  // {id, text, due, done, createdAt}
   taskOperations: [], // durable idempotency records and safe MCP receipts
+  taskDelegations: [], // durable Codex queue state for codex-tagged tasks
+  sidebrainLightPresets: [], // named multi-light settings; no Govee credentials
 };
 
 const PUBLIC_SETTING_KEYS = [
@@ -86,6 +92,13 @@ function publicSettings(settings) {
   return safe;
 }
 
+function bearerAuthorized(req, expected) {
+  const received = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const left = Buffer.from(received);
+  const right = Buffer.from(String(expected || ''));
+  return !!right.length && left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
 function loadDb() {
   try {
     const db = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
@@ -98,6 +111,7 @@ function loadDb() {
 let db = loadDb();
 let saveTimer = null;
 migrateTaskWriteSchema(db);
+migrateHomeSchema(db);
 
 if (!db.settings.captureToken) {
   db.settings.captureToken = crypto.randomBytes(16).toString('hex');
@@ -108,6 +122,7 @@ for (const m of db.messages) {
   if (m.task === undefined) m.task = !!m.plannedFor;
   m.done = !!m.done;
 }
+migrateDelegationSchema(db);
 
 // purge trash older than 30 days
 {
@@ -903,7 +918,12 @@ async function handleApi(req, res, pathname) {
   // ---- state
   if (resource === 'state' && method === 'GET') {
     const ip = lanIp();
-    const { taskOperations: _taskOperations, ...applicationState } = db;
+    const {
+      taskOperations: _taskOperations,
+      taskDelegations: _taskDelegations,
+      sidebrainLightPresets: _sidebrainLightPresets,
+      ...applicationState
+    } = db;
     const legacyReminders = db.reminders.filter((reminder) => !(reminder.channel === 'discord' && reminder.state));
     return send(res, 200, {
       ...applicationState,
@@ -920,8 +940,7 @@ async function handleApi(req, res, pathname) {
     if (captureUrl.searchParams.has('token')) {
       return send(res, 400, { error: 'capture token must be sent in the Authorization header' });
     }
-    const auth = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    if (auth !== db.settings.captureToken) return send(res, 401, { error: 'invalid capture token' });
+    if (!bearerAuthorized(req, db.settings.captureToken)) return send(res, 401, { error: 'invalid capture token' });
     const body = await readBody(req);
     const raw = String(body.text || '').trim();
     if (!raw) return send(res, 400, { error: 'text required' });
@@ -934,9 +953,23 @@ async function handleApi(req, res, pathname) {
     return send(res, 201, db.messages.find((m) => m.id === msg.id) || msg);
   }
 
+  // ---- narrow authenticated Apple Shortcut command path
+  if (resource === 'voice-command' && method === 'POST') {
+    const voiceUrl = new URL(req.url, 'http://x');
+    if (voiceUrl.searchParams.has('token')) {
+      return send(res, 400, { error: 'voice token must be sent in the Authorization header' });
+    }
+    if (!bearerAuthorized(req, db.settings.captureToken)) return send(res, 401, { error: 'invalid voice token' });
+    const result = await voiceCommandService.execute(await readBody(req));
+    return send(res, 200, result);
+  }
+
   // ---- settings
   if (resource === 'settings' && method === 'PATCH') {
     const body = await readBody(req);
+    if (Object.keys(body).some((key) => /govee.*(?:api)?key/i.test(key))) {
+      return send(res, 400, { error: 'Govee credentials must use the protected local key file' });
+    }
     db.settings = { ...db.settings, ...body };
     saveDb();
     return send(res, 200, publicSettings(db.settings));
@@ -1280,7 +1313,33 @@ const taskService = createTaskService({
   deliverDiscord: deliverDurableDiscordReminder,
   now: ipcNow,
 });
-const privateIpc = createPrivateIpcServer({ getDatabase: () => db, taskService, now: ipcNow });
+const homeService = createHomeService({
+  getDatabase: () => db,
+  replaceDatabase: (next) => { db = next; },
+  persistDatabase: persistDbNow,
+  goveeClient: createGoveeClient(),
+  now: ipcNow,
+});
+const delegationService = createDelegationService({
+  getDatabase: () => db,
+  replaceDatabase: (next) => { db = next; },
+  persistDatabase: persistDbNow,
+  now: ipcNow,
+});
+const voiceCommandService = createVoiceCommandService({
+  getDatabase: () => db,
+  taskService,
+  homeService,
+  delegationService,
+  now: ipcNow,
+});
+const privateIpc = createPrivateIpcServer({
+  getDatabase: () => db,
+  taskService,
+  homeService,
+  delegationService,
+  now: ipcNow,
+});
 let reminderTimer = null;
 
 async function start() {
@@ -1306,6 +1365,7 @@ async function start() {
   if (ip && !LISTEN_HOST) console.log(`  ➜  http://${ip}:${activePort}/app   (phone, same Wi-Fi)`);
   console.log(`  ➜  private MCP IPC: ready`);
   console.log(`  ➜  voice capture: Bearer token required at POST /api/capture`);
+  console.log(`  ➜  voice commands: Bearer token required at POST /api/voice-command`);
   console.log(`  ➜  voice cleanup: ${process.env.OPENAI_API_KEY ? 'OpenAI (' + (process.env.OPENAI_MODEL || 'gpt-4o-mini') + ')' : 'heuristic (set OPENAI_API_KEY for LLM cleanup)'}\n`);
   saveDb(); // persist a freshly generated capture token
   reminderTimer = setInterval(() => {
