@@ -13,7 +13,9 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
+const { writeJsonDurably } = require('./lib/durable-json-store');
 const { createPrivateIpcServer } = require('./lib/private-ipc');
+const { createTaskService, migrateTaskWriteSchema } = require('./lib/task-service');
 
 const PORT = process.env.PORT || 4780;
 const LISTEN_HOST = process.env.SIDEBRAIN_LISTEN_HOST || undefined;
@@ -50,6 +52,7 @@ const DEFAULT_DB = {
   habits: {},     // {'YYYY-MM-DD': {gym, workout, steps, calories, weight}}
   messages: [],   // {id, text, createdAt, pinned, tagIds[], files[], list, checked[], canvas:{on,x,y}}
   reminders: [],  // {id, text, due, done, createdAt}
+  taskOperations: [], // durable idempotency records and safe MCP receipts
 };
 
 const PUBLIC_SETTING_KEYS = [
@@ -93,6 +96,7 @@ function loadDb() {
 
 let db = loadDb();
 let saveTimer = null;
+migrateTaskWriteSchema(db);
 
 if (!db.settings.captureToken) {
   db.settings.captureToken = crypto.randomBytes(16).toString('hex');
@@ -126,12 +130,14 @@ if (!db.settings.circSeeded) {
   if (db.settings.digestHour === 8) db.settings.digestHour = null; // briefing replaces it
 }
 
+function persistDbNow(database = db) {
+  writeJsonDurably(DB_PATH, database);
+}
+
 function saveDb() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    const tmp = DB_PATH + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
-    fs.renameSync(tmp, DB_PATH);
+    persistDbNow(db);
   }, 50);
 }
 
@@ -335,6 +341,25 @@ async function notifyDiscord(title, body) {
   } catch { return false; }
 }
 
+async function deliverDurableDiscordReminder({ title, body }) {
+  const url = String(db.settings.discordWebhook || '').trim();
+  if (!/^https:\/\/(discord|discordapp)\.com\/api\/webhooks\//.test(url)) {
+    throw new Error('Discord reminder delivery is not configured');
+  }
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      content: `**${title}**\n${body}`.slice(0, 1900),
+      allowed_mentions: { parse: [] },
+    }),
+    redirect: 'error',
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error('Discord reminder delivery was rejected');
+  return { ok: true };
+}
+
 async function notifyTelegram(title, body) {
   const token = String(db.settings.telegramToken || '').trim();
   const chat = String(db.settings.telegramChatId || '').trim();
@@ -457,6 +482,7 @@ setInterval(() => {
 
   // exact-time reminder pushes
   for (const r of db.reminders) {
+    if (r.channel === 'discord' && r.state) continue;
     if (r.done || r.notified) continue;
     if (Date.parse(r.due) <= now.getTime()) {
       r.notified = true;
@@ -580,12 +606,26 @@ function applyChatTool(name, args) {
     if (!msg) return { ok: false, error: 'not found' };
     const changed = [];
     if ('text' in args && args.text) { msg.text = String(args.text); changed.push('text'); }
-    for (const k of ['pinned', 'task', 'done']) if (k in args) { msg[k] = !!args[k]; changed.push(k + (args[k] ? '' : ' off')); }
+    for (const k of ['pinned', 'task']) if (k in args) { msg[k] = !!args[k]; changed.push(k + (args[k] ? '' : ' off')); }
     if ('plannedFor' in args) { msg.plannedFor = DAY_RE.test(args.plannedFor || '') ? args.plannedFor : null; msg.taskNotified = false; if (msg.plannedFor) msg.task = true; changed.push('due ' + (msg.plannedFor || 'cleared')); }
     if ('dueTime' in args) { msg.dueTime = TIME_RE.test(args.dueTime || '') ? args.dueTime : null; msg.taskNotified = false; if (msg.dueTime) changed.push('at ' + msg.dueTime); }
     if (Array.isArray(args.tagNames)) { msg.tagIds = [...new Set(args.tagNames.map((n) => tagByNameOrCreate(n)).filter(Boolean).map((t) => t.id))]; changed.push('tags'); }
+    if ('done' in args) {
+      if (msg.task) {
+        taskService.setTaskCompletion({
+          idempotencyKey: `pwa:${uid()}`,
+          origin: 'pwa',
+          taskId: msg.id,
+          completed: !!args.done,
+        });
+      } else {
+        msg.done = !!args.done;
+      }
+      changed.push('done' + (args.done ? '' : ' off'));
+    }
     saveDb();
-    return { ok: true, summary: `updated "${brief(msg.text)}" (${changed.join(', ')})` };
+    const updated = db.messages.find((message) => message.id === msg.id) || msg;
+    return { ok: true, summary: `updated "${brief(updated.text)}" (${changed.join(', ')})` };
   }
   if (name === 'create_reminder') {
     const t = Date.parse(args.due);
@@ -862,7 +902,14 @@ async function handleApi(req, res, pathname) {
   // ---- state
   if (resource === 'state' && method === 'GET') {
     const ip = lanIp();
-    return send(res, 200, { ...db, settings: publicSettings(db.settings), meta: { lanUrl: ip ? `http://${ip}:${PORT}` : null } });
+    const { taskOperations: _taskOperations, ...applicationState } = db;
+    const legacyReminders = db.reminders.filter((reminder) => !(reminder.channel === 'discord' && reminder.state));
+    return send(res, 200, {
+      ...applicationState,
+      reminders: legacyReminders,
+      settings: publicSettings(db.settings),
+      meta: { lanUrl: ip ? `http://${ip}:${PORT}` : null },
+    });
   }
 
   // ---- voice / external capture (Apple Shortcuts etc.)
@@ -904,7 +951,7 @@ async function handleApi(req, res, pathname) {
       return send(res, 201, msg);
     }
     if (method === 'PATCH' && id) {
-      const msg = db.messages.find((m) => m.id === id);
+      let msg = db.messages.find((m) => m.id === id);
       if (!msg) return send(res, 404, { error: 'not found' });
       const body = await readBody(req);
       if ('text' in body) {
@@ -915,7 +962,20 @@ async function handleApi(req, res, pathname) {
       }
       if ('parentId' in body) msg.parentId = body.parentId && db.messages.some((m) => m.id === body.parentId) ? body.parentId : null;
       if ('tagIds' in body) msg.tagIds = [...new Set(body.tagIds)];
-      for (const k of ['pinned', 'list', 'checked', 'canvas', 'task', 'done']) if (k in body) msg[k] = body[k];
+      for (const k of ['pinned', 'list', 'checked', 'canvas', 'task']) if (k in body) msg[k] = body[k];
+      if ('done' in body) {
+        if (msg.task) {
+          taskService.setTaskCompletion({
+            idempotencyKey: `pwa:${uid()}`,
+            origin: 'pwa',
+            taskId: msg.id,
+            completed: !!body.done,
+          });
+          msg = db.messages.find((message) => message.id === id);
+        } else {
+          msg.done = body.done;
+        }
+      }
       if (body.restore) msg.deletedAt = null;
       if ('plannedFor' in body) msg.plannedFor = DAY_RE.test(body.plannedFor || '') ? body.plannedFor : null;
       if ('dueTime' in body) msg.dueTime = TIME_RE.test(body.dueTime || '') ? body.dueTime : null;
@@ -1211,7 +1271,15 @@ const server = http.createServer(async (req, res) => {
 const ipcNow = process.env.NODE_ENV === 'test' && process.env.SIDEBRAIN_MCP_TEST_NOW
   ? () => new Date(process.env.SIDEBRAIN_MCP_TEST_NOW)
   : () => new Date();
-const privateIpc = createPrivateIpcServer({ getDatabase: () => db, now: ipcNow });
+const taskService = createTaskService({
+  getDatabase: () => db,
+  replaceDatabase: (next) => { db = next; },
+  persistDatabase: persistDbNow,
+  deliverDiscord: deliverDurableDiscordReminder,
+  now: ipcNow,
+});
+const privateIpc = createPrivateIpcServer({ getDatabase: () => db, taskService, now: ipcNow });
+let reminderTimer = null;
 
 async function start() {
   await privateIpc.start();
@@ -1238,12 +1306,19 @@ async function start() {
   console.log(`  ➜  voice capture: Bearer token required at POST /api/capture`);
   console.log(`  ➜  voice cleanup: ${process.env.OPENAI_API_KEY ? 'OpenAI (' + (process.env.OPENAI_MODEL || 'gpt-4o-mini') + ')' : 'heuristic (set OPENAI_API_KEY for LLM cleanup)'}\n`);
   saveDb(); // persist a freshly generated capture token
+  reminderTimer = setInterval(() => {
+    taskService.runReminderCycle().catch(() => console.error('Sidebrain reminder cycle failed'));
+  }, 15_000);
+  taskService.runReminderCycle().catch(() => console.error('Sidebrain reminder recovery failed'));
 }
 
 let stopping = false;
 async function stop() {
   if (stopping) return;
   stopping = true;
+  if (reminderTimer) clearInterval(reminderTimer);
+  clearTimeout(saveTimer);
+  persistDbNow(db);
   await new Promise((resolve) => server.listening ? server.close(resolve) : resolve());
   await privateIpc.close();
 }

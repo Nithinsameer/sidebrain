@@ -118,13 +118,27 @@ Sidebrain currently assumes a trusted personal environment: the Mac, its current
 - Existing LAN, Tailscale PWA, and Authorization-header Apple Shortcut access are intentional and supported.
 - Before any public deployment, tailnet sharing, or access by untrusted LAN devices, add authentication and authorization, move traffic to HTTPS, review stored credentials and historical logs/backups, and harden all API routes.
 
-The planned ChatGPT integration must use a narrow local MCP sidecar over stdio and private IPC. Its IPC commands must be allowlisted, it must not expose the general Sidebrain HTTP API, and its responses must exclude credentials and unrelated Sidebrain state. MCP write tools remain disabled until durable task writes and the required tunnel-account association have been verified.
+The ChatGPT integration uses a narrow local MCP sidecar over stdio and private IPC. Its IPC commands are allowlisted, it does not expose the general Sidebrain HTTP API, and its responses exclude credentials and unrelated Sidebrain state.
 
-## Read-only MCP sidecar
+## MCP task sidecar
 
-Gate 2 adds a local stdio MCP sidecar with exactly one tool: `get_upcoming_tasks`. The sidecar never opens `data/db.json` or calls Sidebrain's HTTP API. Instead, the main Sidebrain process owns a Unix-domain socket and returns a bounded projection containing only task id, a one-line credential-redacted title, due date/time, and whether the task is overdue, due today, or upcoming.
+The local stdio MCP sidecar exposes exactly five task-scoped tools:
 
-The main process creates a per-user runtime directory (`0700`), socket (`0600`), and ephemeral authorization token (`0600`). Both processes default to the same OS temporary runtime path; set `SIDEBRAIN_MCP_RUNTIME_DIR` for an isolated instance. The token is regenerated on every Sidebrain start and is never printed.
+- `get_upcoming_tasks` returns the Gate 2 bounded, credential-redacted task projection.
+- `find_tasks` finds scheduled or unscheduled tasks by redacted one-line title before completion changes.
+- `create_task` durably creates a task and optional Discord reminders.
+- `set_task_completion` completes or reopens a task; completion cancels undelivered reminders by default.
+- `get_task_receipt` verifies a durable operation by operation ID, task ID, or idempotency key.
+
+The sidecar never opens `data/db.json` or calls Sidebrain's HTTP API. It authenticates to a private Unix-domain socket owned by the main Sidebrain process, which remains the only database writer. The main process creates a per-user runtime directory (`0700`), socket (`0600`), and ephemeral authorization token (`0600`). Both processes default to the same OS temporary runtime path; set `SIDEBRAIN_MCP_RUNTIME_DIR` for an isolated instance. The token is regenerated on every Sidebrain start and is never printed.
+
+Every write requires an 8–128 character idempotency key and one of the fixed origins (`chatgpt`, `chatgpt_voice`, `codex`, `pwa`, or `apple_shortcut`). Repeating the same key and normalized payload returns the original receipt; changing the payload returns a conflict. A successful MCP response is sent only after an atomic temp-file write, file sync, rename, and directory sync have completed.
+
+Dates are stored as local calendar dates. A time always requires an explicit IANA timezone; its exact UTC instant and display timezone are both stored. Nonexistent spring-forward times and ambiguous fall-back times are rejected rather than guessed. Date-only tasks remain date-only.
+
+Discord reminder records use `scheduled`, `leased`, `retry_wait`, `delivered`, `dead_letter`, and `cancelled` states. Delivery is marked complete only after Discord accepts the request. Failures retry after 30 seconds, 2 minutes, 10 minutes, 30 minutes, 2 hours, and then every 6 hours within a persisted 24-hour delivery window. On restart, expired leases are reclaimed, reminders beyond that window are dead-lettered, and overdue reminders still within the window are delivered with recorded lateness; an ambiguous timeout can rarely result in a duplicate Discord notification.
+
+The schema migration is additive and automatic: existing `messages`, `tags`, and legacy `reminders` stay intact, while `taskOperations` is initialized when absent and new Discord reminders carry the state-machine fields. Gate 3 records remain hidden from the legacy PWA reminder list to avoid duplicate browser notifications. The task cards and week planner continue to read the existing `task`, `done`, `plannedFor`, and `dueTime` fields. PWA/API completion and reopening already use the centralized service, so they share MCP reminder cancellation behavior. A later PWA change can route its ordinary task creation and other edits through the service and add reminder status UI without a database migration.
 
 Run the stdio sidecar with:
 
@@ -132,4 +146,4 @@ Run the stdio sidecar with:
 npm run mcp:stdio
 ```
 
-The tool requires an IANA `timeZone` and accepts a 1–31 day window (default 7). It returns open scheduled tasks through that local-date window, including overdue tasks, with at most 100 results. It does not expose settings, credentials, uploads, reminders, note bodies, or unrelated database state. No write tools are present.
+`get_upcoming_tasks` requires an IANA `timeZone` and accepts a 1–31 day window (default 7). It returns open scheduled tasks through that local-date window, including overdue tasks, with at most 100 results. Receipts expose only safe task metadata and reminder states; they never return settings, credentials, uploads, stored details, researched brief bodies, source URLs, or unrelated database state. There are no generic database, settings, file, URL-fetch, update, delete, shell, or arbitrary notification-channel tools.
