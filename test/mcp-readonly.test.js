@@ -9,6 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
 const test = require('node:test');
+const { createPrivateIpcServer } = require('../lib/private-ipc');
 
 const ROOT = path.resolve(__dirname, '..');
 const FIXED_NOW = '2026-08-16T03:30:00.000Z';
@@ -126,6 +127,68 @@ test('IPC authorization rejects missing and invalid credentials and protects run
   const invalid = await ipcRequest({ action: 'get_upcoming_tasks', authorization: 'wrong', params: { timeZone: 'America/New_York' } });
   assert.deepEqual(missing, { ok: false, error: 'unauthorized' });
   assert.deepEqual(invalid, { ok: false, error: 'unauthorized' });
+});
+
+test('IPC read timeout does not truncate a slow completed action receipt', async (t) => {
+  const delayedRuntimeDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-mcp-delay-'));
+  const stub = () => undefined;
+  const delayedServer = createPrivateIpcServer({
+    getDatabase: () => fixtureDatabase(),
+    taskService: {
+      createTask: stub,
+      createReminderTask: stub,
+      setTaskCompletion: stub,
+      getTaskReceipt: stub,
+    },
+    homeService: {
+      listLights: stub,
+      listScenes: stub,
+      controlLights: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        return { results: [{ name: 'Computer table', status: 'updated', stateConfirmed: true }] };
+      },
+      activateScene: stub,
+      listPresets: stub,
+      savePreset: stub,
+      activatePreset: stub,
+    },
+    delegationService: {
+      claimOldest: stub,
+      getBrief: stub,
+      progress: stub,
+      waitForInput: stub,
+      complete: stub,
+      fail: stub,
+      releaseExpired: stub,
+      requeue: stub,
+      status: stub,
+    },
+    environment: { SIDEBRAIN_MCP_RUNTIME_DIR: delayedRuntimeDirectory },
+    connectionReadTimeoutMs: 25,
+  });
+  await delayedServer.start();
+  t.after(async () => {
+    await delayedServer.close();
+    fs.rmSync(delayedRuntimeDirectory, { recursive: true, force: true });
+  });
+
+  const authorization = fs.readFileSync(delayedServer.tokenPath, 'utf8').trim();
+  const response = await new Promise((resolve, reject) => {
+    const socket = net.createConnection(delayedServer.socketPath);
+    let body = '';
+    socket.setEncoding('utf8');
+    socket.once('connect', () => socket.write(`${JSON.stringify({
+      action: 'control_lights',
+      authorization,
+      params: { target: 'all', settings: { brightness: 10 } },
+    })}\n`));
+    socket.on('data', (chunk) => { body += chunk; });
+    socket.once('end', () => resolve(JSON.parse(body.trim())));
+    socket.once('error', reject);
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.result.results[0].stateConfirmed, true);
 });
 
 test('authorized IPC is allowlisted to the narrow Sidebrain actions', async () => {
