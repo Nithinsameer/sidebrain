@@ -25,7 +25,8 @@ function harness(start = '2026-08-16T12:00:00Z') {
     deliverDiscord: async (message) => { deliveries.push(message); return true; }, now: () => new Date(clock), idFactory: () => `notification-${++serial}`,
   });
   return {
-    service, deliveries, runNotifications: () => notificationService.runReminderCycle(), getDatabase: () => database,
+    service, taskService: notificationService, deliveries,
+    runNotifications: () => notificationService.runReminderCycle(), getDatabase: () => database,
     advance: (ms) => { clock = new Date(clock.getTime() + ms); },
   };
 }
@@ -63,6 +64,29 @@ test('delegation records redacted progress, attaches final child note, completes
   assert.equal(deliveries[0].title, 'Sidebrain Codex completed');
   assert.equal(deliveries[0].body.includes('Implemented and tested'), false);
   assert.equal(getDatabase().reminders.find((item) => item.kind === 'delegation_completed').state, 'delivered');
+});
+
+test('explicitly reopening a completed codex task makes its existing delegation claimable again', async () => {
+  const { service, taskService, getDatabase, advance } = harness();
+  const firstClaim = service.claimOldest({});
+  await service.complete({ taskId: firstClaim.taskId, claimToken: firstClaim.claimToken, result: 'First result.' });
+  assert.equal(service.status({ query: 'Older' }).delegations[0].state, 'completed');
+
+  advance(1_000);
+  taskService.setTaskCompletion({
+    idempotencyKey: 'reopen-codex-task-0001',
+    origin: 'pwa',
+    taskId: firstClaim.taskId,
+    completed: false,
+  });
+
+  const secondClaim = service.claimOldest({});
+  assert.equal(secondClaim.taskId, firstClaim.taskId);
+  assert.equal(secondClaim.claimed, true);
+  const record = getDatabase().taskDelegations.find((item) => item.taskId === firstClaim.taskId);
+  assert.equal(record.state, 'claimed');
+  assert.equal(record.completedAt, null);
+  assert.equal(record.attempt, 2);
 });
 
 test('waiting clears a claim without retry and expired recovery releases only stale claims', async () => {
