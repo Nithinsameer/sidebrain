@@ -471,6 +471,19 @@ test('completion cancels undelivered reminders and reopening does not re-arm the
   assert.equal(h.database.taskOperations.at(-1).cancelledReminderCount, 0);
 });
 
+test('an existing open task can be durably marked for the approved Codex project', (t) => {
+  const h = harness(t);
+  const created = h.service.createTask({ idempotencyKey: 'codex-source-task-01', origin: 'apple_shortcut', title: 'Research toll dispute' });
+  const receipt = h.service.markTaskForCodex({
+    idempotencyKey: 'codex-mark-task-0001', origin: 'apple_shortcut', taskId: created.task.id, projectAlias: 'mindchuck',
+  });
+  assert.deepEqual(new Set(receipt.task.tags), new Set(['codex', 'project:mindchuck']));
+  assert.equal(h.database.taskOperations.at(-1).type, 'mark_task_for_codex');
+  assert.throws(() => h.service.markTaskForCodex({
+    idempotencyKey: 'codex-mark-task-0002', origin: 'apple_shortcut', taskId: created.task.id, projectAlias: 'arbitrary-path',
+  }), (error) => error.code === 'invalid_request');
+});
+
 test('receipts exclude credentials, stored bodies, settings, and source URLs', (t) => {
   const h = harness(t);
   h.database.settings.discordWebhook = 'https://discord.com/api/webhooks/private-secret-90210';

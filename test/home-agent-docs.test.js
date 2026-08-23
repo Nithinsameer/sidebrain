@@ -10,7 +10,8 @@ const ROOT = path.resolve(__dirname, '..');
 test('scheduled task specification is Local, live-checkout, single-claim, and worktree-free', () => {
   const spec = fs.readFileSync(path.join(ROOT, 'automation', 'sidebrain-codex-agent.md'), 'utf8');
   assert.match(spec, /^# Sidebrain Codex Agent/m);
-  assert.match(spec, /every 15 minutes/i);
+  assert.match(spec, /daily at 8:30 AM/i);
+  assert.match(spec, /America\/New_York/);
   assert.match(spec, /Execution environment: Local/);
   assert.match(spec, /\/Volumes\/NithinSameer\/Personal\/mindchuck/);
   assert.match(spec, /Worktree: disabled/);
@@ -26,8 +27,8 @@ test('Home Agent runbook documents protected key, Shortcut auth, backup, verific
   const docs = fs.readFileSync(path.join(ROOT, 'docs', 'SIDEBRAIN_HOME_AGENT.md'), 'utf8');
   for (const required of [
     'govee-api-key', 'read -r -s', 'chmod 600', 'POST', '/api/voice-command',
-    'Authorization', 'Speak Text', 'requiresConfirmation', 'data/backups/',
-    'Actual bulb inventory', 'not created or enabled',
+    'Authorization', 'Speak Text', 'confirmation_required', 'voice-command-token', 'data/backups/',
+    'Actual bulb inventory', 'not created or enabled', 'WireGuard-encrypted',
   ]) assert.equal(docs.includes(required), true, `missing ${required}`);
   assert.equal(/Govee API key:\s+[A-Za-z0-9]/.test(docs), false);
 });
