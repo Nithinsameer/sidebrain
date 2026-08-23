@@ -36,6 +36,10 @@ function harness({ classifyIntent = null, delegationStatus = null } = {}) {
   ];
   const homeService = {
     listLights: async () => ({ lights }),
+    listPresets: async () => ({ presets: [
+      { id: 'focus', name: 'Focus' },
+      { id: 'wind-down', name: 'Wind Down' },
+    ] }),
     controlLights: async (input) => {
       calls.push(['control', input]);
       const selected = input.target === 'all' ? lights : lights.filter((light) => input.target.includes(light.id));
@@ -118,6 +122,21 @@ test('light inventory and presets return short, honest partial results for offli
   const preset = await service.execute({ text: 'Activate Wind Down preset' });
   assert.match(preset.text, /Door is offline/);
   assert.deepEqual(calls[0], ['preset', { name: 'Wind Down' }]);
+});
+
+test('an exact known preset name wins over an AI scene misclassification without requiring a light', async () => {
+  let classifierCalls = 0;
+  const { service, calls } = harness({
+    classifyIntent: async () => {
+      classifierCalls += 1;
+      return intent('activate_light_scene', { sceneName: 'Wind Down' });
+    },
+  });
+  const result = await service.execute({ text: 'Activate Wind Down' });
+  assert.match(result.text, /Wind Down was applied to Computer table and Bedside/);
+  assert.match(result.text, /Door is offline/);
+  assert.equal(classifierCalls, 0);
+  assert.deepEqual(calls, [['preset', { name: 'Wind Down' }]]);
 });
 
 test('multi-light controls continue online bulbs and report an offline target honestly', async () => {
