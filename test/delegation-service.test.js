@@ -89,6 +89,36 @@ test('explicitly reopening a completed codex task makes its existing delegation 
   assert.equal(record.attempt, 2);
 });
 
+test('explicitly reopening a legacy completed delegation without completedAt makes it claimable', () => {
+  const { service, taskService, getDatabase, advance } = harness();
+  const task = getDatabase().messages.find((item) => item.id === 'older');
+  task.done = true;
+  task.completedAt = '2026-08-16T11:55:00Z';
+  getDatabase().taskDelegations.push({
+    id: 'legacy-delegation',
+    taskId: task.id,
+    state: 'completed',
+    projectAlias: 'mindchuck',
+    attempt: 0,
+    progress: [],
+    createdAt: '2026-08-16T11:56:00Z',
+    updatedAt: '2026-08-16T11:56:00Z',
+  });
+
+  advance(1_000);
+  taskService.setTaskCompletion({
+    idempotencyKey: 'reopen-legacy-codex-0001',
+    origin: 'pwa',
+    taskId: task.id,
+    completed: false,
+  });
+
+  const claim = service.claimOldest({});
+  assert.equal(claim.taskId, task.id);
+  assert.equal(claim.claimed, true);
+  assert.equal(getDatabase().taskDelegations.find((item) => item.taskId === task.id).completedAt, null);
+});
+
 test('waiting clears a claim without retry and expired recovery releases only stale claims', async () => {
   const firstHarness = harness();
   const first = firstHarness.service.claimOldest({});
