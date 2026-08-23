@@ -56,7 +56,13 @@ Generate it without printing it:
 ( install -d -m 700 "$HOME/.config/sidebrain" && umask 077 && openssl rand -out "$HOME/.config/sidebrain/voice-command-token" -hex 32 && chmod 600 "$HOME/.config/sidebrain/voice-command-token" )
 ```
 
-Create a Shortcut named **Side Brain** with this flow:
+Create the Siri-facing Shortcut **Side Brain** plus two private helper Shortcuts:
+
+- **Side Brain Request** contains the authenticated voice flow below.
+- **Side Brain Offline** speaks one fixed response such as: “I couldn't complete that request. Check Tailscale and make sure the Mac is awake. If they're working, the Side Brain credential or response may need attention.” It never accepts or speaks raw error text.
+- **Side Brain** opens **Side Brain Request** with Shortcuts' x-callback support and routes `x-error` to **Side Brain Offline**. This catches action-level failures that stop the request Shortcut before its own actions can run, including an offline Mac, unavailable Tailscale, timeout, HTTP failure, or malformed response.
+
+Build **Side Brain Request** with this flow:
 
 1. Add **Dictate Text** (or reuse the existing transcription action).
 2. Add **Get Contents of URL**.
@@ -66,7 +72,9 @@ Create a Shortcut named **Side Brain** with this flow:
    - JSON body: `text` = Dictated Text, `timeZone` = `America/New_York`
 3. Read the response as a dictionary, get `spokenResponse`, and pass it to **Speak Text**. Never speak the full dictionary.
 4. If `confirmation_required` is true, add another **Dictate Text**, then POST `confirmationToken` and `confirmationResponse` to the same endpoint with the same headers. Speak only that response's `spokenResponse`. The token is single-use and expires after five minutes.
-5. Wrap the request in Shortcut error handling. Speak a fixed useful message for timeout/server offline, Tailscale unavailable, HTTP 401/503, a missing or malformed dictionary, or a response without `spokenResponse`. Do not speak raw response bodies, credentials, stack traces, internal IDs, or claim tokens.
+5. Let any action-level failure return to the **Side Brain** wrapper, which runs **Side Brain Offline**. Do not pass the callback's `errorMessage` into **Speak Text**. Do not speak raw response bodies, credentials, stack traces, internal IDs, or claim tokens.
+
+Keep iCloud Sync enabled in Shortcuts so the wrapper and both helpers reach the iPhone together. Siri's public invocation remains exactly **“Hey Siri, Side Brain.”** The helper names are implementation details and should not be invoked directly in normal use.
 
 The endpoint supports upcoming and overdue tasks, ordinary tasks, Discord reminders, task finding/completion/reopening/receipts, light inventory and multi-light power/brightness/RGB/color-temperature control, discovered scenes, Sidebrain presets, creating or marking Codex tasks, Codex status/waiting state, and completed summaries. The AI may interpret natural phrasing and dates, but only the validated allowlist executes. Reminder dates and times, ambiguous task matches, completion, reopening, disruptive scenes, and other ambiguous or consequential requests require the spoken confirmation turn.
 
