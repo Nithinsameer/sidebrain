@@ -46,6 +46,23 @@ test('delegation atomically claims oldest eligible task and enforces its lease t
   assert.equal(brief.brief.details.includes('rm -rf'), true);
 });
 
+test('UUID task IDs survive the full claimed delegation lifecycle without credential redaction', async () => {
+  const { service, getDatabase } = harness();
+  const task = getDatabase().messages.find((item) => item.id === 'older');
+  task.id = '018f6f2b-44be-7c8a-9cf1-78f8b94f7bd2';
+
+  const claim = service.claimOldest({});
+  assert.equal(claim.taskId, task.id);
+  assert.equal(service.getBrief({ taskId: task.id, claimToken: claim.claimToken }).taskId, task.id);
+  assert.equal(service.progress({ taskId: task.id, claimToken: claim.claimToken, message: 'Researching approved sources.' }).state, 'running');
+  assert.equal((await service.complete({ taskId: task.id, claimToken: claim.claimToken, result: 'Complete.' })).state, 'completed');
+  assert.equal(getDatabase().messages.some((item) => item.parentId === task.id && item.text === 'Complete.'), true);
+  assert.throws(
+    () => service.releaseExpired({ taskId: '../../unsafe' }),
+    (error) => error.code === 'invalid_request',
+  );
+});
+
 test('delegation records redacted progress, attaches final child note, completes task, and sends safe Discord', async () => {
   const { service, getDatabase, deliveries, runNotifications } = harness();
   const claim = service.claimOldest({});
